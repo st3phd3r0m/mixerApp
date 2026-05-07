@@ -10,14 +10,19 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -32,6 +37,8 @@ fun SessionsScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val sessions by viewModel.sessions.collectAsState()
+    val recentFolders by viewModel.recentFolders.collectAsState()
+    val browserState by viewModel.browserState.collectAsState()
     val importMessage by viewModel.importMessage.collectAsState()
     var showDialog by remember { mutableStateOf(false) }
     var loadingSessionId by remember { mutableStateOf<Int?>(null) }
@@ -54,7 +61,7 @@ fun SessionsScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            viewModel.importSessionFromReaperFolder(it)
+            viewModel.openFolderBrowser(it)
         }
     }
 
@@ -86,32 +93,54 @@ fun SessionsScreen(
             }
         }
     ) { padding ->
-        if (sessions.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "Aucune session.\nAppuyez sur + pour en créer une.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            contentPadding = PaddingValues(vertical = 8.dp)
+        ) {
+            if (recentFolders.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Dossiers recents",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+                items(recentFolders, key = { it.uri.toString() }) { recent ->
+                    RecentFolderItem(
+                        label = recent.label,
+                        relativePath = recent.relativePath,
+                        onImportClick = { viewModel.importSessionFromReaperFolder(recent.uri) },
+                        onBrowseClick = { viewModel.openRecentFolderBrowser(recent.uri) },
+                        onRemoveClick = { viewModel.removeRecentFolder(recent.uri) }
+                    )
+                }
+                item { HorizontalDivider(modifier = Modifier.padding(top = 8.dp)) }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
+
+            if (sessions.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "Aucune session.\nAppuyez sur + pour en créer une.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
                 items(sessions, key = { it.id }) { session ->
                     SessionItem(
-                            session = session,
-                            onClick = { loadingSessionId = session.id },
-                            onDelete = { viewModel.removeSession(session.id) }
-                        )
+                        session = session,
+                        onClick = { loadingSessionId = session.id },
+                        onDelete = { viewModel.removeSession(session.id) }
+                    )
                     HorizontalDivider()
                 }
             }
@@ -125,6 +154,17 @@ fun SessionsScreen(
                 viewModel.addSession(name)
                 showDialog = false
             }
+        )
+    }
+
+    browserState?.let { state ->
+        FolderBrowserDialog(
+            state = state,
+            onDismiss = viewModel::closeFolderBrowser,
+            onUpClick = viewModel::browseUp,
+            onSortModeChange = viewModel::setBrowserSortMode,
+            onOpenFolder = { viewModel.browseInto(it) },
+            onOpenProject = { viewModel.importProjectFromBrowser(it) }
         )
     }
 
@@ -143,6 +183,120 @@ fun SessionsScreen(
             )
         }
     }
+}
+
+@Composable
+private fun RecentFolderItem(
+    label: String,
+    relativePath: String,
+    onImportClick: () -> Unit,
+    onBrowseClick: () -> Unit,
+    onRemoveClick: () -> Unit
+) {
+    ListItem(
+        headlineContent = {
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        },
+        leadingContent = {
+            Icon(Icons.Default.History, contentDescription = null)
+        },
+        supportingContent = {
+            Text(relativePath, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onImportClick) { Text("Importer") }
+                TextButton(onClick = onBrowseClick) { Text("Parcourir") }
+                IconButton(onClick = onRemoveClick) {
+                    Icon(Icons.Default.Close, contentDescription = "Supprimer ce dossier recent")
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun FolderBrowserDialog(
+    state: SessionsViewModel.FolderBrowserState,
+    onDismiss: () -> Unit,
+    onUpClick: () -> Unit,
+    onSortModeChange: (SessionsViewModel.BrowserSortMode) -> Unit,
+    onOpenFolder: (android.net.Uri) -> Unit,
+    onOpenProject: (android.net.Uri) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("Parcourir: ${state.rootLabel}")
+                Text(
+                    text = state.currentLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = state.sortMode == SessionsViewModel.BrowserSortMode.NAME,
+                        onClick = { onSortModeChange(SessionsViewModel.BrowserSortMode.NAME) },
+                        label = { Text("Nom") }
+                    )
+                    FilterChip(
+                        selected = state.sortMode == SessionsViewModel.BrowserSortMode.DATE,
+                        onClick = { onSortModeChange(SessionsViewModel.BrowserSortMode.DATE) },
+                        label = { Text("Date") }
+                    )
+                }
+
+                if (state.canGoUp) {
+                    TextButton(onClick = onUpClick, modifier = Modifier.fillMaxWidth()) {
+                        Text(".. Dossier parent")
+                    }
+                }
+
+                if (state.entries.isEmpty()) {
+                    Text(
+                        text = "Aucun dossier ou projet .rpp ici",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(state.entries, key = { it.uri.toString() }) { entry ->
+                            ListItem(
+                                modifier = Modifier.clickable {
+                                    if (entry.isDirectory) onOpenFolder(entry.uri) else onOpenProject(entry.uri)
+                                },
+                                headlineContent = {
+                                    Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                },
+                                leadingContent = {
+                                    Icon(
+                                        imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
+                                        contentDescription = null
+                                    )
+                                },
+                                supportingContent = {
+                                    Text(if (entry.isDirectory) "Dossier" else "Projet Reaper")
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Fermer")
+            }
+        }
+    )
 }
 
 @Composable
