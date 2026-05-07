@@ -1,0 +1,744 @@
+package com.example.mixerapp.viewmodel
+
+import android.app.Application
+import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.annotation.OptIn
+import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.AudioSink
+import com.example.mixerapp.data.reaper.ReaperProjectParser
+import com.example.mixerapp.data.reaper.ReaperTrackData
+import com.example.mixerapp.data.sessions.SessionProjectLink
+import com.example.mixerapp.data.sessions.SessionProjectLinkStorage
+import com.example.mixerapp.audio.ChannelModeAudioProcessor
+import com.example.mixerapp.model.AudioMode
+import com.example.mixerapp.model.TrackState
+import java.io.File
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+class MixerViewModel(
+    application: Application,
+    val sessionId: Int,
+    val sessionName: String
+) : AndroidViewModel(application) {
+
+    private data class MarkerRange(
+        val startSec: Double,
+        val endSec: Double?
+    )
+
+    private val sessionProjectLinkStorage = SessionProjectLinkStorage(application.applicationContext)
+
+    data class PendingProjectChoice(
+        val name: String,
+        val relativePath: String,
+        val projectUri: Uri,
+        val folderUri: Uri
+    )
+
+    private data class ProjectCandidate(
+        val file: DocumentFile,
+        val relativePath: String
+    )
+
+    companion object {
+        const val TRACK_COUNT = 6
+    }
+
+    // ────────────────────────── État UI ──────────────────────────────────────
+
+    private val _tracks = MutableStateFlow(
+        List(TRACK_COUNT) { i -> TrackState(id = i) }
+    )
+    val tracks: StateFlow<List<TrackState>> = _tracks.asStateFlow()
+
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+
+    private val _importMessage = MutableStateFlow<String?>(null)
+    val importMessage: StateFlow<String?> = _importMessage.asStateFlow()
+
+    private val _visibleTrackCount = MutableStateFlow(TRACK_COUNT)
+    val visibleTrackCount: StateFlow<Int> = _visibleTrackCount.asStateFlow()
+
+    private val _pendingProjectChoices = MutableStateFlow<List<PendingProjectChoice>>(emptyList())
+    val pendingProjectChoices: StateFlow<List<PendingProjectChoice>> = _pendingProjectChoices.asStateFlow()
+
+    private val _playbackProgress = MutableStateFlow(0f)
+    val playbackProgress: StateFlow<Float> = _playbackProgress.asStateFlow()
+
+    private val _projectPositionMs = MutableStateFlow(0L)
+    val projectPositionMs: StateFlow<Long> = _projectPositionMs.asStateFlow()
+
+    private val _projectDurationMs = MutableStateFlow(0L)
+    val projectDurationMs: StateFlow<Long> = _projectDurationMs.asStateFlow()
+
+    private val _activeMarkerName = MutableStateFlow<String?>(null)
+    val activeMarkerName: StateFlow<String?> = _activeMarkerName.asStateFlow()
+
+    private var progressJob: Job? = null
+
+    // ────────────────────────── Couche audio ──────────────────────────────────
+
+    private data class TrackPlayer(
+        val player: ExoPlayer,
+        val processor: ChannelModeAudioProcessor
+    )
+
+    private val trackPlayers: List<TrackPlayer> = buildPlayers(application.applicationContext)
+
+    init {
+        restoreLinkedProjectIfAny()
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildPlayers(context: Context): List<TrackPlayer> =
+        List(TRACK_COUNT) { trackId ->
+            val processor = ChannelModeAudioProcessor()
+            val renderersFactory = object : DefaultRenderersFactory(context) {
+                override fun buildAudioSink(
+                    context: Context,
+                    enableFloatOutput: Boolean,
+                    enableAudioTrackPlaybackParams: Boolean
+                ): AudioSink {
+                    return DefaultAudioSink.Builder(context)
+                        .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain(processor))
+                        .build()
+                }
+            }
+            val player = ExoPlayer.Builder(context, renderersFactory).build().also {
+                it.repeatMode = Player.REPEAT_MODE_OFF
+                it.addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_READY) {
+                            clearTrackError(trackId)
+                        }
+                        handlePlaybackEndedIfNeeded()
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        setTrackError(trackId, toFriendlyPlaybackError(error))
+                    }
+                })
+            }
+            TrackPlayer(player, processor)
+        }
+
+    // ────────────────────────── Actions piste ─────────────────────────────────
+
+    fun loadAudio(trackId: Int, uri: Uri) {
+        _tracks.update { list ->
+            list.map {
+                if (it.id == trackId) it.copy(uri = uri, isLoaded = true, playbackError = null) else it
+            }
+        }
+        trackPlayers[trackId].player.run {
+            setMediaItem(MediaItem.fromUri(uri))
+            prepare()
+            if (_isPlaying.value) play()
+        }
+        updatePlaybackProgress()
+    }
+
+    fun retryLoadAudio(trackId: Int) {
+        val uri = _tracks.value.getOrNull(trackId)?.uri ?: return
+        loadAudio(trackId, uri)
+    }
+
+    fun setVolume(trackId: Int, volume: Float) {
+        _tracks.update { list ->
+            list.map { if (it.id == trackId) it.copy(volume = volume) else it }
+        }
+        applyVolume(trackId, _tracks.value)
+    }
+
+    fun toggleMute(trackId: Int) {
+        _tracks.update { list ->
+            list.map { if (it.id == trackId) it.copy(isMuted = !it.isMuted) else it }
+        }
+        applyAllVolumes(_tracks.value)
+    }
+
+    fun toggleSolo(trackId: Int) {
+        _tracks.update { list ->
+            list.map { if (it.id == trackId) it.copy(isSolo = !it.isSolo) else it }
+        }
+        applyAllVolumes(_tracks.value)
+    }
+
+    fun setAudioMode(trackId: Int, mode: AudioMode) {
+        _tracks.update { list ->
+            list.map { if (it.id == trackId) it.copy(audioMode = mode) else it }
+        }
+        // Mise à jour immédiate du processeur audio (thread-safe via @Volatile)
+        trackPlayers[trackId].processor.audioMode = mode
+    }
+
+    fun importReaperProject(
+        projectUri: Uri,
+        persistLink: Boolean = true,
+        markerStartSec: Double? = null,
+        markerEndSec: Double? = null,
+        markerName: String? = null
+    ) {
+        viewModelScope.launch {
+            val content = runCatching {
+                getApplication<Application>().contentResolver.openInputStream(projectUri)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    ?: throw IllegalStateException("Impossible de lire le fichier projet")
+            }.getOrElse {
+                _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
+                return@launch
+            }
+
+            val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
+            val project = ReaperProjectParser.parseProject(content)
+            val parsedTracks = markerRange?.let {
+                ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
+            } ?: ReaperProjectParser.parse(content)
+            if (parsedTracks.isEmpty()) {
+                _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
+                return@launch
+            }
+
+            val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
+                resolveSourceFileUri(projectUri, track.sourceFile)
+            }
+
+            _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
+
+            if (persistLink) {
+                sessionProjectLinkStorage.save(
+                    sessionId,
+                    SessionProjectLink(
+                        projectUri = projectUri,
+                        folderUri = null,
+                        markerName = markerName,
+                        markerStartSec = markerRange?.startSec,
+                        markerEndSec = markerRange?.endSec
+                    )
+                )
+            }
+
+            val importedCount = parsedTracks.take(TRACK_COUNT).size
+            val missingAudio = importedCount - loadedAudioCount
+            _importMessage.value = if (missingAudio > 0) {
+                "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges. " +
+                    "$missingAudio fichier(s) introuvable(s): utilise 'Importer dossier session'."
+            } else {
+                "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+            }
+        }
+    }
+
+    fun importReaperProjectFromFolder(folderUri: Uri) {
+        viewModelScope.launch {
+            val resolver = getApplication<Application>().contentResolver
+            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
+            if (root == null || !root.isDirectory) {
+                _importMessage.value = "Dossier invalide"
+                return@launch
+            }
+
+            val projectFiles = findProjectFiles(root)
+            if (projectFiles.isEmpty()) {
+                _importMessage.value = "Aucun fichier .rpp trouve dans le dossier"
+                return@launch
+            }
+
+            if (projectFiles.size > 1) {
+                _pendingProjectChoices.value = projectFiles
+                    .sortedBy { it.relativePath.lowercase() }
+                    .map {
+                        PendingProjectChoice(
+                            name = it.file.name ?: "projet.rpp",
+                            relativePath = it.relativePath,
+                            projectUri = it.file.uri,
+                            folderUri = folderUri
+                        )
+                    }
+                _importMessage.value = "Plusieurs projets detectes: choisis le .rpp"
+                return@launch
+            }
+
+            importReaperProjectDocument(root, projectFiles.first().file, resolver)
+        }
+    }
+
+    fun chooseProjectFromFolder(
+        projectUri: Uri,
+        folderUri: Uri,
+        persistLink: Boolean = true,
+        markerStartSec: Double? = null,
+        markerEndSec: Double? = null,
+        markerName: String? = null
+    ) {
+        viewModelScope.launch {
+            val resolver = getApplication<Application>().contentResolver
+            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
+            if (root == null || !root.isDirectory) {
+                _pendingProjectChoices.value = emptyList()
+                _importMessage.value = "Dossier invalide"
+                return@launch
+            }
+            val projectFile = DocumentFile.fromSingleUri(getApplication(), projectUri)
+            if (projectFile == null || !projectFile.isFile) {
+                _pendingProjectChoices.value = emptyList()
+                _importMessage.value = "Fichier .rpp invalide"
+                return@launch
+            }
+
+            _pendingProjectChoices.value = emptyList()
+            importReaperProjectDocument(
+                root,
+                projectFile,
+                resolver,
+                persistLink,
+                markerStartSec,
+                markerEndSec,
+                markerName
+            )
+        }
+    }
+
+    fun cancelProjectChoice() {
+        _pendingProjectChoices.value = emptyList()
+        _importMessage.value = "Import annule"
+    }
+
+    private fun importReaperProjectDocument(
+        root: DocumentFile,
+        projectFile: DocumentFile,
+        resolver: android.content.ContentResolver,
+        persistLink: Boolean = true,
+        markerStartSec: Double? = null,
+        markerEndSec: Double? = null,
+        markerName: String? = null
+    ) {
+        viewModelScope.launch {
+
+            val content = runCatching {
+                resolver.openInputStream(projectFile.uri)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    ?: throw IllegalStateException("Impossible de lire ${projectFile.name ?: "le projet"}")
+            }.getOrElse {
+                _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
+                return@launch
+            }
+
+            val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
+            val project = ReaperProjectParser.parseProject(content)
+            val parsedTracks = markerRange?.let {
+                ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
+            } ?: ReaperProjectParser.parse(content)
+            if (parsedTracks.isEmpty()) {
+                _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
+                return@launch
+            }
+
+            val indexedFiles = buildAudioIndex(root)
+            val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
+                resolveSourceFileInTree(track.sourceFile, indexedFiles)
+            }
+
+            _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
+
+            if (persistLink) {
+                sessionProjectLinkStorage.save(
+                    sessionId,
+                    SessionProjectLink(
+                        projectUri = projectFile.uri,
+                        folderUri = root.uri,
+                        markerName = markerName,
+                        markerStartSec = markerRange?.startSec,
+                        markerEndSec = markerRange?.endSec
+                    )
+                )
+            }
+
+            val importedCount = parsedTracks.take(TRACK_COUNT).size
+            _importMessage.value = "Import ${projectFile.name ?: "dossier"} OK: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+        }
+    }
+
+    private fun applyImportedSession(
+        parsedTracks: List<ReaperTrackData>,
+        sourceResolver: (Int, ReaperTrackData) -> Uri?
+    ): Int {
+        val limited = parsedTracks.take(TRACK_COUNT)
+        _visibleTrackCount.value = limited.size
+        var loadedAudioCount = 0
+
+        _tracks.update { current ->
+            current.map { existing ->
+                val imported = limited.getOrNull(existing.id)
+                if (imported == null) {
+                    existing.copy(
+                        uri = null,
+                        isLoaded = false,
+                        playbackError = null,
+                        isMuted = false,
+                        isSolo = false,
+                        volume = 0.8f,
+                        audioMode = AudioMode.STEREO
+                    )
+                } else {
+                    existing.copy(
+                        name = imported.name?.takeIf { it.isNotBlank() } ?: "Track ${existing.id + 1}",
+                        volume = (imported.volume ?: 0.8f).coerceIn(0f, 1f),
+                        isMuted = imported.isMuted ?: false,
+                        isSolo = imported.isSolo ?: false,
+                        audioMode = ReaperProjectParser.panToAudioMode(imported.pan),
+                        uri = null,
+                        isLoaded = false,
+                        playbackError = null
+                    )
+                }
+            }
+        }
+
+        _tracks.value.forEachIndexed { index, track ->
+            trackPlayers[index].processor.audioMode = track.audioMode
+        }
+
+        limited.forEachIndexed { index, track ->
+            val resolvedUri = sourceResolver(index, track)
+            if (resolvedUri != null) {
+                loadAudio(index, resolvedUri)
+                loadedAudioCount++
+            }
+        }
+
+        applyAllVolumes(_tracks.value)
+        return loadedAudioCount
+    }
+
+    private fun restoreLinkedProjectIfAny() {
+        val link = sessionProjectLinkStorage.load(sessionId) ?: return
+        if (link.folderUri != null) {
+            chooseProjectFromFolder(
+                link.projectUri,
+                link.folderUri,
+                persistLink = false,
+                markerStartSec = link.markerStartSec,
+                markerEndSec = link.markerEndSec,
+                markerName = link.markerName
+            )
+        } else {
+            importReaperProject(
+                link.projectUri,
+                persistLink = false,
+                markerStartSec = link.markerStartSec,
+                markerEndSec = link.markerEndSec,
+                markerName = link.markerName
+            )
+        }
+    }
+
+    private fun findProjectFiles(root: DocumentFile): List<ProjectCandidate> {
+        val result = mutableListOf<ProjectCandidate>()
+        val stack = ArrayDeque<Pair<DocumentFile, String>>()
+        stack.add(root to "")
+
+        while (stack.isNotEmpty()) {
+            val (current, relBase) = stack.removeFirst()
+            current.listFiles().forEach { child ->
+                val childName = child.name ?: return@forEach
+                val relPath = if (relBase.isEmpty()) childName else "$relBase/$childName"
+
+                when {
+                    child.isDirectory -> stack.add(child to relPath)
+                    child.isFile && childName.endsWith(".rpp", ignoreCase = true) -> {
+                        result += ProjectCandidate(child, relPath)
+                    }
+                }
+            }
+        }
+
+        return result
+    }
+
+    private fun buildAudioIndex(root: DocumentFile): Map<String, Uri> {
+        val index = mutableMapOf<String, Uri>()
+        val stack = ArrayDeque<DocumentFile>()
+        stack.add(root)
+
+        while (stack.isNotEmpty()) {
+            val current = stack.removeFirst()
+            current.listFiles().forEach { child ->
+                when {
+                    child.isDirectory -> stack.add(child)
+                    child.isFile -> {
+                        val name = child.name?.trim()?.lowercase() ?: return@forEach
+                        if (name.endsWith(".wav") && name !in index) {
+                            index[name] = child.uri
+                        }
+                    }
+                }
+            }
+        }
+        return index
+    }
+
+    private fun resolveSourceFileInTree(sourceFile: String?, audioIndex: Map<String, Uri>): Uri? {
+        val source = sourceFile?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val key = source.substringAfterLast('/').substringAfterLast('\\').lowercase()
+        return audioIndex[key]
+    }
+
+    fun consumeImportMessage() {
+        _importMessage.value = null
+    }
+
+    // ────────────────────────── Transport global ──────────────────────────────
+
+    fun playAll() {
+        val loadedTracks = _tracks.value.filter { it.isLoaded }
+        if (loadedTracks.isEmpty()) {
+            _isPlaying.value = false
+            return
+        }
+
+        _isPlaying.value = true
+        trackPlayers.forEachIndexed { index, tp ->
+            if (_tracks.value[index].isLoaded) {
+                if (tp.player.playbackState == Player.STATE_ENDED) {
+                    tp.player.seekTo(0)
+                }
+                tp.player.play()
+            }
+        }
+        startProgressTicker()
+    }
+
+    fun pauseAll() {
+        _isPlaying.value = false
+        trackPlayers.forEach { it.player.pause() }
+        stopProgressTicker()
+        updatePlaybackProgress()
+    }
+
+    fun stopAll() {
+        _isPlaying.value = false
+        trackPlayers.forEach { tp ->
+            tp.player.pause()
+            tp.player.seekTo(0)
+        }
+        stopProgressTicker()
+        updatePlaybackProgress(forcePositionZero = true)
+    }
+
+    private fun handlePlaybackEndedIfNeeded() {
+        if (!_isPlaying.value) return
+
+        val loadedIndices = _tracks.value
+            .filter { it.isLoaded }
+            .map { it.id }
+
+        if (loadedIndices.isEmpty()) return
+
+        val allEnded = loadedIndices.all { index ->
+            trackPlayers[index].player.playbackState == Player.STATE_ENDED
+        }
+
+        if (allEnded) {
+            _isPlaying.value = false
+            stopProgressTicker()
+            updatePlaybackProgress()
+        }
+    }
+
+    private fun startProgressTicker() {
+        if (progressJob?.isActive == true) return
+        progressJob = viewModelScope.launch {
+            while (isActive && _isPlaying.value) {
+                updatePlaybackProgress()
+                delay(120)
+            }
+        }
+    }
+
+    private fun stopProgressTicker() {
+        progressJob?.cancel()
+        progressJob = null
+    }
+
+    private fun updatePlaybackProgress(forcePositionZero: Boolean = false) {
+        val loadedIndices = _tracks.value
+            .filter { it.isLoaded }
+            .map { it.id }
+
+        if (loadedIndices.isEmpty()) {
+            _projectDurationMs.value = 0L
+            _projectPositionMs.value = 0L
+            _playbackProgress.value = 0f
+            return
+        }
+
+        var durationMs = 0L
+        var positionMs = 0L
+
+        loadedIndices.forEach { index ->
+            val player = trackPlayers[index].player
+            val d = player.duration
+            if (d != C.TIME_UNSET && d > durationMs) {
+                durationMs = d
+            }
+            if (!forcePositionZero) {
+                val p = player.currentPosition
+                if (p > positionMs) positionMs = p
+            }
+        }
+
+        if (durationMs > 0L && positionMs > durationMs) {
+            positionMs = durationMs
+        }
+
+        _projectDurationMs.value = durationMs.coerceAtLeast(0L)
+        _projectPositionMs.value = positionMs.coerceAtLeast(0L)
+        _playbackProgress.value =
+            if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+            else 0f
+    }
+
+    private fun setTrackError(trackId: Int, message: String) {
+        _tracks.update { list ->
+            list.map { track ->
+                if (track.id == trackId) track.copy(playbackError = message) else track
+            }
+        }
+        _importMessage.value = "${_tracks.value[trackId].name}: $message"
+    }
+
+    private fun clearTrackError(trackId: Int) {
+        _tracks.update { list ->
+            list.map { track ->
+                if (track.id == trackId) track.copy(playbackError = null) else track
+            }
+        }
+    }
+
+    private fun toFriendlyPlaybackError(error: PlaybackException): String {
+        return when (error.errorCode) {
+            PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+            PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> {
+                "Fichier inaccessible (permission ou emplacement)."
+            }
+
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> {
+                "Format audio non supporte par l'appareil."
+            }
+
+            else -> {
+                error.message?.takeIf { it.isNotBlank() }
+                    ?: "Lecture impossible pour ce fichier audio."
+            }
+        }
+    }
+
+    // ────────────────────────── Volume effectif ───────────────────────────────
+
+    /** Volume réel en tenant compte du mute et du solo. */
+    private fun effectiveVolume(track: TrackState, allTracks: List<TrackState>): Float {
+        if (track.isMuted) return 0f
+        val anySolo = allTracks.any { it.isSolo }
+        if (anySolo && !track.isSolo) return 0f
+        return track.volume
+    }
+
+    private fun applyAllVolumes(tracks: List<TrackState>) {
+        tracks.forEach { track ->
+            trackPlayers[track.id].player.volume = effectiveVolume(track, tracks)
+        }
+    }
+
+    private fun applyVolume(trackId: Int, tracks: List<TrackState>) {
+        trackPlayers[trackId].player.volume = effectiveVolume(tracks[trackId], tracks)
+    }
+
+    private fun resolveSourceFileUri(projectUri: Uri, sourceFile: String?): Uri? {
+        val source = sourceFile?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+
+        if (source.startsWith("/")) {
+            val file = File(source)
+            if (file.exists()) return Uri.fromFile(file)
+        }
+
+        if (projectUri.scheme == "file") {
+            val projectFile = File(projectUri.path ?: return null)
+            val candidate = File(projectFile.parentFile, source)
+            if (candidate.exists()) return Uri.fromFile(candidate)
+        }
+
+        if (projectUri.scheme == "content") {
+            val absoluteProjectPath = guessAbsolutePathFromDocumentUri(projectUri)
+            if (absoluteProjectPath != null) {
+                val candidate = File(File(absoluteProjectPath).parentFile, source)
+                if (candidate.exists()) return Uri.fromFile(candidate)
+            }
+        }
+        return null
+    }
+
+    // Heuristique utile avec ExternalStorageProvider pour reconstituer un chemin absolu.
+    private fun guessAbsolutePathFromDocumentUri(uri: Uri): String? {
+        return runCatching {
+            val documentId = DocumentsContract.getDocumentId(uri)
+            val parts = documentId.split(":", limit = 2)
+            if (parts.size != 2) return null
+            val volume = parts[0]
+            val relPath = parts[1]
+
+            when {
+                volume.equals("primary", ignoreCase = true) -> "/storage/emulated/0/$relPath"
+                else -> "/storage/$volume/$relPath"
+            }
+        }.getOrNull()
+    }
+
+    // ────────────────────────── Cycle de vie ──────────────────────────────────
+
+    override fun onCleared() {
+        stopProgressTicker()
+        trackPlayers.forEach { it.player.release() }
+        super.onCleared()
+    }
+}
+
+// Factory pour injecter sessionId + sessionName sans Hilt
+class MixerViewModelFactory(
+    private val application: Application,
+    private val sessionId: Int,
+    private val sessionName: String
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+        MixerViewModel(application, sessionId, sessionName) as T
+}
+

@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MixerApp</string>
+    <string name="imported_tracks_count">%1$d/%2$d pistes importees</string>
+    <string name="active_segment_label">Segment: %1$s</string>
+</resources>
