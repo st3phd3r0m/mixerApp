@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 
 class SessionsViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -40,6 +43,12 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     private val _browserState = MutableStateFlow<FolderBrowserState?>(null)
     val browserState: StateFlow<FolderBrowserState?> = _browserState.asStateFlow()
 
+    private val _isImportingProject = MutableStateFlow(false)
+    val isImportingProject: StateFlow<Boolean> = _isImportingProject.asStateFlow()
+
+    private val _importProgressPercent = MutableStateFlow(0)
+    val importProgressPercent: StateFlow<Int> = _importProgressPercent.asStateFlow()
+
     fun addSession(name: String) {
         val newId = (_sessions.value.maxOfOrNull { it.id } ?: -1) + 1
         _sessions.update { current ->
@@ -58,32 +67,117 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun importSessionFromReaperFolder(folderUri: Uri) {
-        viewModelScope.launch {
-            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
-            if (root == null || !root.isDirectory) {
-                onInvalidFolderUri(folderUri, "Dossier invalide ou non accessible")
-                return@launch
-            }
+    /** Appelée depuis le callback du picker SAF (main thread) pour afficher le spinner immédiatement */
+    fun startImportProgressNow() {
+        startImportProgress()
+    }
 
-            rememberRecentFolder(root)
+    /** Lance l'import du dossier avec un délai de 500ms pour laisser le picker se fermer et Compose recomposer */
+    fun importSessionFromReaperFolderWithDelay(folderUri: Uri) {
+        viewModelScope.launch(Dispatchers.Main) {
+            // Attendre 500ms pour laisser le picker se fermer + Compose recomposer le spinner
+            delay(500)
 
-            val projectFiles = runCatching { findProjectFiles(root) }.getOrElse {
-                onInvalidFolderUri(folderUri, "Impossible d'ouvrir ce dossier. Re-selectionnez-le.")
-                return@launch
-            }
-            if (projectFiles.isEmpty()) {
-                _importMessage.value = "Aucun fichier .rpp trouve dans ce dossier"
-                return@launch
-            }
+            val startTimeMs = System.currentTimeMillis()
+            try {
+                // Vérification dossier (IO)
+                val root = withContext(Dispatchers.IO) {
+                    DocumentFile.fromTreeUri(getApplication(), folderUri)
+                }
+                if (root == null || !root.isDirectory) {
+                    onInvalidFolderUri(folderUri, "Dossier invalide ou non accessible")
+                    return@launch
+                }
+                rememberRecentFolder(root)
+                updateImportProgress(20)
 
-            val selected = projectFiles.sortedBy { it.relativePath.lowercase() }.first()
-            importProjectFromFile(
-                projectUri = selected.file.uri,
-                projectDisplayName = selected.file.name,
-                folderUri = folderUri,
-                multiProjectHint = projectFiles.size > 1
-            )
+                // Scan des .rpp sur IO thread (bloquant), main thread libre pour recomposer
+                val projectFiles = withContext(Dispatchers.IO) {
+                    runCatching { findProjectFiles(root) }.getOrNull()
+                }
+                if (projectFiles == null) {
+                    onInvalidFolderUri(folderUri, "Impossible d'ouvrir ce dossier. Re-selectionnez-le.")
+                    return@launch
+                }
+                if (projectFiles.isEmpty()) {
+                    _importMessage.value = "Aucun fichier .rpp trouve dans ce dossier"
+                    return@launch
+                }
+                updateImportProgress(35)
+
+                val selected = projectFiles.sortedBy { it.relativePath.lowercase() }.first()
+
+                // Lecture du fichier .rpp sur IO thread
+                val content = withContext(Dispatchers.IO) {
+                    runCatching {
+                        getApplication<Application>().contentResolver.openInputStream(selected.file.uri)
+                            ?.bufferedReader()?.use { it.readText() }
+                    }.getOrNull()
+                }
+                if (content == null) {
+                    _importMessage.value = "Import impossible: erreur de lecture"
+                    return@launch
+                }
+                updateImportProgress(50)
+
+                // Parse sur IO thread (CPU)
+                val slices = withContext(Dispatchers.IO) {
+                    val p = ReaperProjectParser.parseProject(content)
+                    ReaperProjectParser.markerSlices(p)
+                }
+                updateImportProgress(70)
+
+                // Création sessions sur Main thread (StateFlow)
+                val baseName = selected.file.name?.removeSuffix(".rpp")?.takeIf { it.isNotBlank() } ?: "Session importee"
+                val createdSessions = mutableListOf<Session>()
+                val startId = (_sessions.value.maxOfOrNull { it.id } ?: -1) + 1
+                _sessions.update { current ->
+                    val toCreate = if (slices.isEmpty()) {
+                        listOf(Session(startId, baseName))
+                    } else {
+                        slices.mapIndexed { index, slice ->
+                            Session(startId + index, slice.name.takeIf { it.isNotBlank() } ?: "Marker ${slice.index}")
+                        }
+                    }
+                    createdSessions += toCreate
+                    val updated = current + toCreate
+                    storage.saveSessions(updated)
+                    updated
+                }
+                updateImportProgress(85)
+
+                // Sauvegarde des liens sur IO thread
+                withContext(Dispatchers.IO) {
+                    if (slices.isEmpty()) {
+                        createdSessions.firstOrNull()?.let { session ->
+                            projectLinkStorage.save(session.id, SessionProjectLink(projectUri = selected.file.uri, folderUri = folderUri))
+                        }
+                    } else {
+                        slices.forEachIndexed { index, slice ->
+                            val session = createdSessions.getOrNull(index) ?: return@forEachIndexed
+                            projectLinkStorage.save(session.id, SessionProjectLink(
+                                projectUri = selected.file.uri,
+                                folderUri = folderUri,
+                                markerName = slice.name,
+                                markerStartSec = slice.startSec,
+                                markerEndSec = slice.endSec
+                            ))
+                        }
+                    }
+                }
+                updateImportProgress(100)
+
+                val multiHint = if (projectFiles.size > 1) " (plusieurs .rpp detectes, premier selectionne)" else ""
+                _importMessage.value = if (slices.isEmpty()) "Session '$baseName' creee$multiHint"
+                                       else "${slices.size} sessions creees depuis markers$multiHint"
+
+                // Garder le spinner visible au moins 800ms
+                val elapsedMs = System.currentTimeMillis() - startTimeMs
+                if (elapsedMs < 800L) delay(800L - elapsedMs)
+
+            } finally {
+                finishImportProgress()
+            }
         }
     }
 
@@ -92,18 +186,6 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
             val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
             if (root == null || !root.isDirectory) {
                 onInvalidFolderUri(folderUri, "Ce dossier recent n'est plus accessible. Re-selectionnez-le.")
-                return@launch
-            }
-
-            openFolderBrowser(root)
-        }
-    }
-
-    fun openFolderBrowser(folderUri: Uri) {
-        viewModelScope.launch {
-            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
-            if (root == null || !root.isDirectory) {
-                onInvalidFolderUri(folderUri, "Dossier invalide ou non accessible")
                 return@launch
             }
 
@@ -162,14 +244,25 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
             ?.firstOrNull { it.uri == projectUri }
             ?.name
 
+        // Affiche le spinner de progression EN PREMIER pour qu'il soit visible
+        startImportProgress()
+
+        // ENSUITE ferme le dialog pour ne pas masquer le spinner
+        closeFolderBrowser()
+
         viewModelScope.launch {
-            importProjectFromFile(
-                projectUri = projectUri,
-                projectDisplayName = projectName,
-                folderUri = rootUri,
-                multiProjectHint = false
-            )
-            closeFolderBrowser()
+            try {
+                updateImportProgress(30)
+                importProjectFromFile(
+                    projectUri = projectUri,
+                    projectDisplayName = projectName,
+                    folderUri = rootUri,
+                    multiProjectHint = false
+                )
+                updateImportProgress(100)
+            } finally {
+                finishImportProgress()
+            }
         }
     }
 
@@ -187,6 +280,7 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         folderUri: Uri,
         multiProjectHint: Boolean
     ) {
+        updateImportProgress(45)
         val content = runCatching {
             getApplication<Application>().contentResolver.openInputStream(projectUri)
                 ?.bufferedReader()
@@ -206,6 +300,7 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
 
         val createdSessions = mutableListOf<Session>()
         val startId = (_sessions.value.maxOfOrNull { it.id } ?: -1) + 1
+        updateImportProgress(60)
 
         _sessions.update { current ->
             val toCreate = if (slices.isEmpty()) {
@@ -246,6 +341,7 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
                 )
             }
         }
+        updateImportProgress(85)
 
         val multiHint = if (multiProjectHint) {
             " (plusieurs .rpp detectes, premier selectionne)"
@@ -258,6 +354,7 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         } else {
             "${slices.size} sessions creees depuis markers$multiHint"
         }
+        updateImportProgress(100)
     }
 
     private fun onInvalidFolderUri(folderUri: Uri, message: String) {
@@ -336,6 +433,19 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         return Uri.decode(raw).replace(':', '/').trim('/').ifBlank { "Dossier" }
     }
 
+    private fun startImportProgress() {
+        _importProgressPercent.value = 0
+        _isImportingProject.value = true
+    }
+
+    private fun finishImportProgress() {
+        _isImportingProject.value = false
+    }
+
+    private fun updateImportProgress(percent: Int) {
+        _importProgressPercent.value = percent.coerceIn(0, 100)
+    }
+
     fun consumeImportMessage() {
         _importMessage.value = null
     }
@@ -390,4 +500,3 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         private const val MAX_RECENT_FOLDERS = 6
     }
 }
-

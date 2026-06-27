@@ -40,17 +40,30 @@ fun SessionsScreen(
     val recentFolders by viewModel.recentFolders.collectAsState()
     val browserState by viewModel.browserState.collectAsState()
     val importMessage by viewModel.importMessage.collectAsState()
+    val isImportingProject by viewModel.isImportingProject.collectAsState()
+    val importProgressPercent by viewModel.importProgressPercent.collectAsState()
     var showDialog by remember { mutableStateOf(false) }
     var loadingSessionId by remember { mutableStateOf<Int?>(null) }
+    var loadingSessionProgress by remember { mutableStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Navigation déclenchée après un court délai pour laisser le spinner s'afficher
     LaunchedEffect(loadingSessionId) {
         val id = loadingSessionId ?: return@LaunchedEffect
-        delay(350)
+        val totalDurationMs = 420L
+        val tickMs = 30L
+        val ticks = (totalDurationMs / tickMs).toInt().coerceAtLeast(1)
+        loadingSessionProgress = 0
+
+        repeat(ticks) { step ->
+            delay(tickMs)
+            loadingSessionProgress = (((step + 1) * 100f) / ticks).toInt().coerceIn(0, 100)
+        }
+
         val session = sessions.firstOrNull { it.id == id }
         if (session != null) onSessionClick(session)
         loadingSessionId = null
+        loadingSessionProgress = 0
     }
 
     val folderImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -61,7 +74,10 @@ fun SessionsScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            viewModel.openFolderBrowser(it)
+            // Afficher le spinner immédiatement sur le main thread (avant fermeture du picker)
+            viewModel.startImportProgressNow()
+            // Lancer l'import avec délai pour laisser Compose recomposer
+            viewModel.importSessionFromReaperFolderWithDelay(it)
         }
     }
 
@@ -111,7 +127,10 @@ fun SessionsScreen(
                     RecentFolderItem(
                         label = recent.label,
                         relativePath = recent.relativePath,
-                        onImportClick = { viewModel.importSessionFromReaperFolder(recent.uri) },
+                        onImportClick = {
+                            viewModel.startImportProgressNow()
+                            viewModel.importSessionFromReaperFolderWithDelay(recent.uri)
+                        },
                         onBrowseClick = { viewModel.openRecentFolderBrowser(recent.uri) },
                         onRemoveClick = { viewModel.removeRecentFolder(recent.uri) }
                     )
@@ -168,19 +187,63 @@ fun SessionsScreen(
         )
     }
 
-    // Overlay de chargement
-    if (loadingSessionId != null) {
+    // Overlay spinner import dossier
+    if (isImportingProject) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.35f)),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(64.dp),
-                strokeWidth = 5.dp,
-                color = MaterialTheme.colorScheme.primary
-            )
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        progress = { importProgressPercent.coerceIn(0, 100) / 100f },
+                        modifier = Modifier.size(56.dp),
+                        strokeWidth = 5.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text("Import de la session...")
+                    Text("${importProgressPercent.coerceIn(0, 100)}%")
+                }
+            }
+        }
+    } else if (loadingSessionId != null) {
+        // Overlay spinner chargement session
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.35f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        progress = { loadingSessionProgress.coerceIn(0, 100) / 100f },
+                        modifier = Modifier.size(56.dp),
+                        strokeWidth = 5.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text("Chargement de la session...")
+                    Text("${loadingSessionProgress.coerceIn(0, 100)}%")
+                }
+            }
         }
     }
 }
@@ -350,4 +413,3 @@ private fun AddSessionDialog(
         }
     )
 }
-

@@ -96,7 +96,21 @@ class MixerViewModel(
     private val _activeMarkerName = MutableStateFlow<String?>(null)
     val activeMarkerName: StateFlow<String?> = _activeMarkerName.asStateFlow()
 
+    private val _isImportingProject = MutableStateFlow(false)
+    val isImportingProject: StateFlow<Boolean> = _isImportingProject.asStateFlow()
+
+    private val _importProgressPercent = MutableStateFlow(0)
+    val importProgressPercent: StateFlow<Int> = _importProgressPercent.asStateFlow()
+
+    private val _importProjectLabel = MutableStateFlow<String?>(null)
+    val importProjectLabel: StateFlow<String?> = _importProjectLabel.asStateFlow()
+
+
     private var progressJob: Job? = null
+    private var playStartRealtimeMs: Long = 0L
+    private var virtualStartPositionMs: Long = 0L   // Position virtuelle au démarrage/resume
+    private var lastPausedPositionMs: Long = 0L      // Position virtuelle sauvée lors du pause
+    private val pendingOffsetJobs = mutableMapOf<Int, Job>()  // Jobs de démarrage décalé
 
     // ────────────────────────── Couche audio ──────────────────────────────────
 
@@ -202,52 +216,60 @@ class MixerViewModel(
         markerName: String? = null
     ) {
         viewModelScope.launch {
-            val content = runCatching {
-                getApplication<Application>().contentResolver.openInputStream(projectUri)
-                    ?.bufferedReader()
-                    ?.use { it.readText() }
-                    ?: throw IllegalStateException("Impossible de lire le fichier projet")
-            }.getOrElse {
-                _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
-                return@launch
-            }
+            startImportProgress(projectUri.lastPathSegment)
+            try {
+                val content = runCatching {
+                    getApplication<Application>().contentResolver.openInputStream(projectUri)
+                        ?.bufferedReader()
+                        ?.use { it.readText() }
+                        ?: throw IllegalStateException("Impossible de lire le fichier projet")
+                }.getOrElse {
+                    _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
+                    return@launch
+                }
+                updateImportProgress(20)
 
-            val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
-            val project = ReaperProjectParser.parseProject(content)
-            val parsedTracks = markerRange?.let {
-                ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
-            } ?: ReaperProjectParser.parse(content)
-            if (parsedTracks.isEmpty()) {
-                _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
-                return@launch
-            }
+                val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
+                val project = ReaperProjectParser.parseProject(content)
+                val parsedTracks = markerRange?.let {
+                    ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
+                } ?: ReaperProjectParser.parse(content)
+                if (parsedTracks.isEmpty()) {
+                    _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
+                    return@launch
+                }
+                updateImportProgress(35)
 
-            val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
-                resolveSourceFileUri(projectUri, track.sourceFile)
-            }
+                val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
+                    resolveSourceFileUri(projectUri, track.sourceFile)
+                }
 
-            _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
+                _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
 
-            if (persistLink) {
-                sessionProjectLinkStorage.save(
-                    sessionId,
-                    SessionProjectLink(
-                        projectUri = projectUri,
-                        folderUri = null,
-                        markerName = markerName,
-                        markerStartSec = markerRange?.startSec,
-                        markerEndSec = markerRange?.endSec
+                if (persistLink) {
+                    sessionProjectLinkStorage.save(
+                        sessionId,
+                        SessionProjectLink(
+                            projectUri = projectUri,
+                            folderUri = null,
+                            markerName = markerName,
+                            markerStartSec = markerRange?.startSec,
+                            markerEndSec = markerRange?.endSec
+                        )
                     )
-                )
-            }
+                }
 
-            val importedCount = parsedTracks.take(TRACK_COUNT).size
-            val missingAudio = importedCount - loadedAudioCount
-            _importMessage.value = if (missingAudio > 0) {
-                "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges. " +
-                    "$missingAudio fichier(s) introuvable(s): utilise 'Importer dossier session'."
-            } else {
-                "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+                val importedCount = parsedTracks.take(TRACK_COUNT).size
+                val missingAudio = importedCount - loadedAudioCount
+                _importMessage.value = if (missingAudio > 0) {
+                    "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges. " +
+                        "$missingAudio fichier(s) introuvable(s): utilise 'Importer dossier session'."
+                } else {
+                    "Session importee: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+                }
+                updateImportProgress(100)
+            } finally {
+                finishImportProgress()
             }
         }
     }
@@ -337,49 +359,56 @@ class MixerViewModel(
         markerName: String? = null
     ) {
         viewModelScope.launch {
+            startImportProgress(projectFile.name)
+            try {
+                val content = runCatching {
+                    resolver.openInputStream(projectFile.uri)
+                        ?.bufferedReader()
+                        ?.use { it.readText() }
+                        ?: throw IllegalStateException("Impossible de lire ${projectFile.name ?: "le projet"}")
+                }.getOrElse {
+                    _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
+                    return@launch
+                }
+                updateImportProgress(20)
 
-            val content = runCatching {
-                resolver.openInputStream(projectFile.uri)
-                    ?.bufferedReader()
-                    ?.use { it.readText() }
-                    ?: throw IllegalStateException("Impossible de lire ${projectFile.name ?: "le projet"}")
-            }.getOrElse {
-                _importMessage.value = "Import impossible: ${it.message ?: "erreur de lecture"}"
-                return@launch
-            }
+                val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
+                val project = ReaperProjectParser.parseProject(content)
+                val parsedTracks = markerRange?.let {
+                    ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
+                } ?: ReaperProjectParser.parse(content)
+                if (parsedTracks.isEmpty()) {
+                    _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
+                    return@launch
+                }
+                updateImportProgress(35)
 
-            val markerRange = if (markerStartSec != null) MarkerRange(markerStartSec, markerEndSec) else null
-            val project = ReaperProjectParser.parseProject(content)
-            val parsedTracks = markerRange?.let {
-                ReaperProjectParser.tracksForMarker(project, it.startSec, it.endSec)
-            } ?: ReaperProjectParser.parse(content)
-            if (parsedTracks.isEmpty()) {
-                _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
-                return@launch
-            }
+                val indexedFiles = buildAudioIndex(root)
+                val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
+                    resolveSourceFileInTree(track.sourceFile, indexedFiles)
+                }
 
-            val indexedFiles = buildAudioIndex(root)
-            val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
-                resolveSourceFileInTree(track.sourceFile, indexedFiles)
-            }
+                _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
 
-            _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
-
-            if (persistLink) {
-                sessionProjectLinkStorage.save(
-                    sessionId,
-                    SessionProjectLink(
-                        projectUri = projectFile.uri,
-                        folderUri = root.uri,
-                        markerName = markerName,
-                        markerStartSec = markerRange?.startSec,
-                        markerEndSec = markerRange?.endSec
+                if (persistLink) {
+                    sessionProjectLinkStorage.save(
+                        sessionId,
+                        SessionProjectLink(
+                            projectUri = projectFile.uri,
+                            folderUri = root.uri,
+                            markerName = markerName,
+                            markerStartSec = markerRange?.startSec,
+                            markerEndSec = markerRange?.endSec
+                        )
                     )
-                )
-            }
+                }
 
-            val importedCount = parsedTracks.take(TRACK_COUNT).size
-            _importMessage.value = "Import ${projectFile.name ?: "dossier"} OK: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+                val importedCount = parsedTracks.take(TRACK_COUNT).size
+                _importMessage.value = "Import ${projectFile.name ?: "dossier"} OK: $importedCount piste(s), $loadedAudioCount audio(s) charges"
+                updateImportProgress(100)
+            } finally {
+                finishImportProgress()
+            }
         }
     }
 
@@ -390,6 +419,7 @@ class MixerViewModel(
         val limited = parsedTracks.take(TRACK_COUNT)
         _visibleTrackCount.value = limited.size
         var loadedAudioCount = 0
+        updateImportProgress(40)
 
         _tracks.update { current ->
             current.map { existing ->
@@ -413,7 +443,9 @@ class MixerViewModel(
                         audioMode = ReaperProjectParser.panToAudioMode(imported.pan),
                         uri = null,
                         isLoaded = false,
-                        playbackError = null
+                        playbackError = null,
+                        startOffsetMs = (imported.startOffsetSec * 1000.0).toLong().coerceAtLeast(0L),
+                        loop = imported.loop
                     )
                 }
             }
@@ -421,6 +453,8 @@ class MixerViewModel(
 
         _tracks.value.forEachIndexed { index, track ->
             trackPlayers[index].processor.audioMode = track.audioMode
+            // Applique le mode répétition (LOOP=1 dans Reaper → REPEAT_MODE_ONE sur ExoPlayer)
+            trackPlayers[index].player.repeatMode = if (track.loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         }
 
         limited.forEachIndexed { index, track ->
@@ -428,6 +462,10 @@ class MixerViewModel(
             if (resolvedUri != null) {
                 loadAudio(index, resolvedUri)
                 loadedAudioCount++
+            }
+            if (limited.isNotEmpty()) {
+                val step = ((index + 1) * 60) / limited.size
+                updateImportProgress(40 + step)
             }
         }
 
@@ -508,6 +546,21 @@ class MixerViewModel(
         return audioIndex[key]
     }
 
+    private fun startImportProgress(projectLabel: String?) {
+        _importProjectLabel.value = projectLabel?.takeIf { it.isNotBlank() }
+        _importProgressPercent.value = 0
+        _isImportingProject.value = true
+    }
+
+    private fun finishImportProgress() {
+        _isImportingProject.value = false
+        _importProjectLabel.value = null
+    }
+
+    private fun updateImportProgress(percent: Int) {
+        _importProgressPercent.value = percent.coerceIn(0, 100)
+    }
+
     fun consumeImportMessage() {
         _importMessage.value = null
     }
@@ -522,32 +575,100 @@ class MixerViewModel(
         }
 
         _isPlaying.value = true
-        trackPlayers.forEachIndexed { index, tp ->
-            if (_tracks.value[index].isLoaded) {
-                if (tp.player.playbackState == Player.STATE_ENDED) {
+        val resumeFromMs = lastPausedPositionMs
+        playStartRealtimeMs = System.currentTimeMillis()
+        virtualStartPositionMs = resumeFromMs
+
+        // Annuler les jobs de démarrage décalé en attente
+        pendingOffsetJobs.values.forEach { it.cancel() }
+        pendingOffsetJobs.clear()
+
+        loadedTracks.forEach { track ->
+            val tp = trackPlayers[track.id]
+            val offsetMs = track.startOffsetMs
+
+            if (offsetMs <= resumeFromMs) {
+                // Cette piste devrait déjà jouer: seek à la bonne position dans le fichier
+                val filePositionMs = resumeFromMs - offsetMs
+                if (filePositionMs > 0L) {
+                    tp.player.seekTo(filePositionMs)
+                } else if (tp.player.playbackState == Player.STATE_ENDED) {
                     tp.player.seekTo(0)
                 }
                 tp.player.play()
+            } else {
+                // Cette piste démarre plus tard: programmer le démarrage décalé
+                tp.player.seekTo(0)
+                tp.player.pause()
+                val delayMs = offsetMs - resumeFromMs
+                val job = viewModelScope.launch {
+                    delay(delayMs)
+                    if (_isPlaying.value) tp.player.play()
+                }
+                pendingOffsetJobs[track.id] = job
             }
         }
         startProgressTicker()
     }
 
     fun pauseAll() {
+        lastPausedPositionMs = _projectPositionMs.value
         _isPlaying.value = false
+        pendingOffsetJobs.values.forEach { it.cancel() }
+        pendingOffsetJobs.clear()
         trackPlayers.forEach { it.player.pause() }
         stopProgressTicker()
         updatePlaybackProgress()
     }
 
     fun stopAll() {
+        lastPausedPositionMs = 0L
+        virtualStartPositionMs = 0L
         _isPlaying.value = false
+        pendingOffsetJobs.values.forEach { it.cancel() }
+        pendingOffsetJobs.clear()
         trackPlayers.forEach { tp ->
             tp.player.pause()
             tp.player.seekTo(0)
         }
         stopProgressTicker()
         updatePlaybackProgress(forcePositionZero = true)
+    }
+
+    fun seekToProgress(progress: Float) {
+        val durationMs = _projectDurationMs.value
+        if (durationMs <= 0L) return
+        val clampedProgress = progress.coerceIn(0f, 1f)
+        val targetMs = (durationMs * clampedProgress).toLong().coerceIn(0L, durationMs)
+
+        // Annuler les jobs décalés en attente
+        pendingOffsetJobs.values.forEach { it.cancel() }
+        pendingOffsetJobs.clear()
+
+        lastPausedPositionMs = targetMs
+        virtualStartPositionMs = targetMs
+        playStartRealtimeMs = System.currentTimeMillis()
+        _projectPositionMs.value = targetMs
+
+        _tracks.value.filter { it.isLoaded }.forEach { track ->
+            val tp = trackPlayers[track.id]
+            val offsetMs = track.startOffsetMs
+            if (targetMs >= offsetMs) {
+                tp.player.seekTo(targetMs - offsetMs)
+                if (_isPlaying.value) tp.player.play()
+            } else {
+                tp.player.seekTo(0)
+                tp.player.pause()
+                if (_isPlaying.value) {
+                    val delayMs = offsetMs - targetMs
+                    val job = viewModelScope.launch {
+                        delay(delayMs)
+                        if (_isPlaying.value) tp.player.play()
+                    }
+                    pendingOffsetJobs[track.id] = job
+                }
+            }
+        }
     }
 
     private fun handlePlaybackEndedIfNeeded() {
@@ -586,40 +707,41 @@ class MixerViewModel(
     }
 
     private fun updatePlaybackProgress(forcePositionZero: Boolean = false) {
-        val loadedIndices = _tracks.value
-            .filter { it.isLoaded }
-            .map { it.id }
+        val loadedTracks = _tracks.value.filter { it.isLoaded }
 
-        if (loadedIndices.isEmpty()) {
+        if (loadedTracks.isEmpty()) {
             _projectDurationMs.value = 0L
             _projectPositionMs.value = 0L
             _playbackProgress.value = 0f
             return
         }
 
+        // Durée totale = max(durée fichier + offset) sur toutes les pistes chargées
         var durationMs = 0L
-        var positionMs = 0L
-
-        loadedIndices.forEach { index ->
-            val player = trackPlayers[index].player
+        loadedTracks.forEach { track ->
+            val player = trackPlayers[track.id].player
             val d = player.duration
-            if (d != C.TIME_UNSET && d > durationMs) {
-                durationMs = d
-            }
-            if (!forcePositionZero) {
-                val p = player.currentPosition
-                if (p > positionMs) positionMs = p
+            if (d != C.TIME_UNSET && d > 0) {
+                val virtualDuration = d + track.startOffsetMs
+                if (virtualDuration > durationMs) durationMs = virtualDuration
             }
         }
 
-        if (durationMs > 0L && positionMs > durationMs) {
-            positionMs = durationMs
+        // Position virtuelle = temps écoulé depuis le dernier play (horloge temps-réel)
+        val positionMs = when {
+            forcePositionZero -> 0L
+            _isPlaying.value && playStartRealtimeMs > 0L -> {
+                val elapsed = System.currentTimeMillis() - playStartRealtimeMs
+                (virtualStartPositionMs + elapsed).coerceAtLeast(0L)
+            }
+            else -> lastPausedPositionMs
         }
 
+        val clampedPosition = if (durationMs > 0L) positionMs.coerceAtMost(durationMs) else positionMs
         _projectDurationMs.value = durationMs.coerceAtLeast(0L)
-        _projectPositionMs.value = positionMs.coerceAtLeast(0L)
+        _projectPositionMs.value = clampedPosition.coerceAtLeast(0L)
         _playbackProgress.value =
-            if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+            if (durationMs > 0L) (clampedPosition.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
             else 0f
     }
 
@@ -741,4 +863,3 @@ class MixerViewModelFactory(
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
         MixerViewModel(application, sessionId, sessionName) as T
 }
-

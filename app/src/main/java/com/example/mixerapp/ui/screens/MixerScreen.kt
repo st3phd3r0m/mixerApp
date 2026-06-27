@@ -20,7 +20,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -58,6 +57,9 @@ fun MixerScreen(
     val activeMarkerName by viewModel.activeMarkerName.collectAsState()
     val importMessage by viewModel.importMessage.collectAsState()
     val pendingProjectChoices by viewModel.pendingProjectChoices.collectAsState()
+    val isImportingProject by viewModel.isImportingProject.collectAsState()
+    val importProgressPercent by viewModel.importProgressPercent.collectAsState()
+    val importProjectLabel by viewModel.importProjectLabel.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val sessionImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -140,7 +142,13 @@ fun MixerScreen(
                     onPause = viewModel::pauseAll,
                     onStop = viewModel::stopAll
                 )
-                LaserProgressBar(playbackProgress = playbackProgress)
+                LaserProgressBar(
+                    playbackProgress = playbackProgress,
+                    projectPositionMs = projectPositionMs,
+                    projectDurationMs = projectDurationMs,
+                    canSeek = projectDurationMs > 0L,
+                    onSeek = viewModel::seekToProgress
+                )
             }
         }
     ) { padding ->
@@ -230,6 +238,54 @@ fun MixerScreen(
             }
         )
     }
+
+    if (isImportingProject) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.35f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.padding(24.dp)
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 20.dp)
+                ) {
+                    CircularProgressIndicator(
+                        progress = { (importProgressPercent.coerceIn(0, 100)) / 100f },
+                        modifier = Modifier.size(56.dp),
+                        strokeWidth = 5.dp
+                    )
+                    Text(
+                        text = "Import du projet...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 12.dp)
+                    )
+                    importProjectLabel?.let { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    Text(
+                        text = "${importProgressPercent.coerceIn(0, 100)}%",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,30 +351,60 @@ private fun TransportBar(
 }
 
 @Composable
-private fun LaserProgressBar(playbackProgress: Float) {
-    Box(
+private fun LaserProgressBar(
+    playbackProgress: Float,
+    projectPositionMs: Long,
+    projectDurationMs: Long,
+    canSeek: Boolean,
+    onSeek: (Float) -> Unit
+) {
+    var sliderProgress by remember { mutableStateOf(playbackProgress.coerceIn(0f, 1f)) }
+    var isDragging by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playbackProgress) {
+        if (!isDragging) {
+            sliderProgress = playbackProgress.coerceIn(0f, 1f)
+        }
+    }
+
+    val dragTargetPositionMs = (projectDurationMs * sliderProgress.coerceIn(0f, 1f)).toLong()
+    val displayPositionMs = if (isDragging) dragTargetPositionMs else projectPositionMs
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .height(8.dp)
-            .background(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.extraLarge
-            )
+            .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .fillMaxWidth(playbackProgress.coerceIn(0f, 1f))
-                .background(
-                    brush = Brush.horizontalGradient(
-                        listOf(
-                            Color(0xFF3DDCFF),
-                            Color(0xFF8A5CFF)
-                        )
-                    ),
-                    shape = MaterialTheme.shapes.extraLarge
-                )
+        if (isDragging) {
+            Text(
+                text = "${formatMillis(displayPositionMs)} / ${formatMillis(projectDurationMs)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+            )
+        }
+
+        Slider(
+            value = sliderProgress,
+            onValueChange = {
+                isDragging = true
+                sliderProgress = it
+            },
+            onValueChangeFinished = {
+                isDragging = false
+                onSeek(sliderProgress)
+            },
+            enabled = canSeek,
+            valueRange = 0f..1f,
+            modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+                thumbColor = Color(0xFF8A5CFF),
+                activeTrackColor = Color(0xFF3DDCFF),
+                inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                disabledThumbColor = MaterialTheme.colorScheme.outline,
+                disabledActiveTrackColor = MaterialTheme.colorScheme.outlineVariant,
+                disabledInactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
         )
     }
 }
@@ -535,4 +621,3 @@ private fun AudioModeSelector(
         }
     }
 }
-
