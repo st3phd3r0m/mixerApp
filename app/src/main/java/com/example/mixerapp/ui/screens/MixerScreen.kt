@@ -30,9 +30,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.mixerapp.R
 import com.example.mixerapp.model.AudioMode
+import com.example.mixerapp.model.LimiterConfiguration
 import com.example.mixerapp.model.TrackState
 import com.example.mixerapp.viewmodel.MixerViewModel
 import com.example.mixerapp.viewmodel.MixerViewModelFactory
+import kotlin.math.pow
+import kotlin.math.log10
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +63,8 @@ fun MixerScreen(
     val isImportingProject by viewModel.isImportingProject.collectAsState()
     val importProgressPercent by viewModel.importProgressPercent.collectAsState()
     val importProjectLabel by viewModel.importProjectLabel.collectAsState()
+    val limiterConfig by viewModel.limiterConfig.collectAsState()
+    val masterVolume by viewModel.masterVolume.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val sessionImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -187,6 +192,15 @@ fun MixerScreen(
                 HorizontalDivider()
             }
 
+            MasterBusControls(
+                limiterConfig = limiterConfig,
+                onLimiterConfigChange = viewModel::updateLimiterConfig,
+                masterVolume = masterVolume,
+                onMasterVolumeChange = viewModel::setMasterVolume
+            )
+
+            HorizontalDivider(thickness = 2.dp, color = MaterialTheme.colorScheme.primary)
+
             activeMarkerName?.let { marker ->
                 AssistChip(
                     onClick = {},
@@ -285,6 +299,161 @@ fun MixerScreen(
                 }
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Master Bus (Limiter & Volume)
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun MasterBusControls(
+    limiterConfig: LimiterConfiguration,
+    onLimiterConfigChange: (LimiterConfiguration) -> Unit,
+    masterVolume: Float,
+    onMasterVolumeChange: (Float) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.2f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "Master Bus",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 12.dp)
+                )
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Réduire" else "Détails")
+                }
+            }
+
+            // Master Volume Slider
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Text(
+                    text = "Gain",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(32.dp)
+                )
+                val currentDb = linearToDb(masterVolume)
+                Slider(
+                    value = currentDb,
+                    onValueChange = { onMasterVolumeChange(dbToLinear(it)) },
+                    valueRange = -60f..12f,
+                    modifier = Modifier.weight(1f),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.tertiary,
+                        activeTrackColor = MaterialTheme.colorScheme.tertiary
+                    )
+                )
+
+                Text(
+                    text = if (masterVolume <= 0.0001f) "-inf" else "%.1f".format(currentDb),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.width(42.dp),
+                    textAlign = TextAlign.End,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Surface(
+                    onClick = { onMasterVolumeChange(1.0f) },
+                    shape = MaterialTheme.shapes.extraSmall,
+                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f),
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.size(width = 36.dp, height = 24.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "0dB",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 9.sp
+                        )
+                    }
+                }
+            }
+
+            if (expanded) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = limiterConfig.isEnabled,
+                        onCheckedChange = { onLimiterConfigChange(limiterConfig.copy(isEnabled = it)) }
+                    )
+                    Text(
+                        "Limiter",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                LimiterSlider(
+                    label = "Threshold",
+                    value = limiterConfig.thresholdDb,
+                    valueRange = -60f..0f,
+                    unit = "dB",
+                    onValueChange = { onLimiterConfigChange(limiterConfig.copy(thresholdDb = it)) }
+                )
+                LimiterSlider(
+                    label = "Ceiling",
+                    value = limiterConfig.ceilingDb,
+                    valueRange = -20f..0f,
+                    unit = "dB",
+                    onValueChange = { onLimiterConfigChange(limiterConfig.copy(ceilingDb = it)) }
+                )
+                LimiterSlider(
+                    label = "Release",
+                    value = limiterConfig.releaseMs,
+                    valueRange = 1f..1000f,
+                    unit = "ms",
+                    onValueChange = { onLimiterConfigChange(limiterConfig.copy(releaseMs = it)) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LimiterSlider(
+    label: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    unit: String,
+    onValueChange: (Float) -> Unit
+) {
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall)
+            Text("${value.toInt()} $unit", style = MaterialTheme.typography.labelSmall)
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            modifier = Modifier.height(24.dp)
+        )
     }
 }
 
@@ -417,6 +586,16 @@ private fun formatMillis(ms: Long): String {
     return "%02d:%02d".format(min, sec)
 }
 
+private fun linearToDb(linear: Float): Float {
+    if (linear <= 0f) return -60f
+    return (20f * log10(linear.coerceAtLeast(1e-4f))).coerceIn(-60f, 12f)
+}
+
+private fun dbToLinear(db: Float): Float {
+    if (db <= -59.9f) return 0f
+    return 10f.pow(db / 20f)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Rang piste
 // ─────────────────────────────────────────────────────────────────────────────
@@ -512,10 +691,11 @@ private fun TrackRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.width(24.dp)
             )
+            val currentDb = linearToDb(track.volume)
             Slider(
-                value = track.volume,
-                onValueChange = onVolumeChange,
-                valueRange = 0f..1f,
+                value = currentDb,
+                onValueChange = { onVolumeChange(dbToLinear(it)) },
+                valueRange = -60f..12f,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(
                     thumbColor = if (isEffectivelyMuted)
@@ -524,13 +704,32 @@ private fun TrackRow(
                         MaterialTheme.colorScheme.primary
                 )
             )
+
             Text(
-                text = "${(track.volume * 100).toInt()}%",
+                text = if (track.volume <= 0.0001f) "-inf" else "%.1f".format(currentDb),
                 style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.width(36.dp),
+                modifier = Modifier.width(42.dp),
                 textAlign = TextAlign.End,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            // Bouton Reset à 0dB
+            Surface(
+                onClick = { onVolumeChange(1.0f) }, // 0dB = 1.0 linéaire
+                shape = MaterialTheme.shapes.extraSmall,
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.size(width = 36.dp, height = 24.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "0dB",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp
+                    )
+                }
+            }
         }
 
         if (track.playbackError != null) {

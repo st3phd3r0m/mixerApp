@@ -25,6 +25,7 @@ import com.example.mixerapp.data.sessions.SessionProjectLink
 import com.example.mixerapp.data.sessions.SessionProjectLinkStorage
 import com.example.mixerapp.audio.ChannelModeAudioProcessor
 import com.example.mixerapp.model.AudioMode
+import com.example.mixerapp.model.LimiterConfiguration
 import com.example.mixerapp.model.TrackState
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,6 +106,12 @@ class MixerViewModel(
     private val _importProjectLabel = MutableStateFlow<String?>(null)
     val importProjectLabel: StateFlow<String?> = _importProjectLabel.asStateFlow()
 
+    private val _limiterConfig = MutableStateFlow(LimiterConfiguration())
+    val limiterConfig: StateFlow<LimiterConfiguration> = _limiterConfig.asStateFlow()
+
+    private val _masterVolume = MutableStateFlow(1.0f)
+    val masterVolume: StateFlow<Float> = _masterVolume.asStateFlow()
+
 
     private var progressJob: Job? = null
     private var playStartRealtimeMs: Long = 0L
@@ -129,6 +136,9 @@ class MixerViewModel(
     private fun buildPlayers(context: Context): List<TrackPlayer> =
         List(TRACK_COUNT) { trackId ->
             val processor = ChannelModeAudioProcessor()
+            processor.limiterConfig = _limiterConfig.value
+            processor.volume = _tracks.value[trackId].volume
+            processor.masterVolume = _masterVolume.value
             val renderersFactory = object : DefaultRenderersFactory(context) {
                 override fun buildAudioSink(
                     context: Context,
@@ -437,7 +447,7 @@ class MixerViewModel(
                 } else {
                     existing.copy(
                         name = imported.name?.takeIf { it.isNotBlank() } ?: "Track ${existing.id + 1}",
-                        volume = (imported.volume ?: 0.8f).coerceIn(0f, 1f),
+                        volume = (imported.volume ?: 0.8f).coerceAtLeast(0f),
                         isMuted = imported.isMuted ?: false,
                         isSolo = imported.isSolo ?: false,
                         audioMode = ReaperProjectParser.panToAudioMode(imported.pan),
@@ -563,6 +573,23 @@ class MixerViewModel(
 
     fun consumeImportMessage() {
         _importMessage.value = null
+    }
+
+    // ────────────────────────── Master Limiter ───────────────────────────────
+
+    fun updateLimiterConfig(config: LimiterConfiguration) {
+        _limiterConfig.value = config
+        // Update audio processors
+        trackPlayers.forEach { it.processor.limiterConfig = config }
+    }
+
+    fun toggleLimiter(enabled: Boolean) {
+        updateLimiterConfig(_limiterConfig.value.copy(isEnabled = enabled))
+    }
+
+    fun setMasterVolume(volume: Float) {
+        _masterVolume.value = volume
+        trackPlayers.forEach { it.processor.masterVolume = volume }
     }
 
     // ────────────────────────── Transport global ──────────────────────────────
@@ -796,12 +823,16 @@ class MixerViewModel(
 
     private fun applyAllVolumes(tracks: List<TrackState>) {
         tracks.forEach { track ->
-            trackPlayers[track.id].player.volume = effectiveVolume(track, tracks)
+            val vol = effectiveVolume(track, tracks)
+            trackPlayers[track.id].processor.volume = vol
+            trackPlayers[track.id].player.volume = 1f
         }
     }
 
     private fun applyVolume(trackId: Int, tracks: List<TrackState>) {
-        trackPlayers[trackId].player.volume = effectiveVolume(tracks[trackId], tracks)
+        val vol = effectiveVolume(tracks[trackId], tracks)
+        trackPlayers[trackId].processor.volume = vol
+        trackPlayers[trackId].player.volume = 1f
     }
 
     private fun resolveSourceFileUri(projectUri: Uri, sourceFile: String?): Uri? {
