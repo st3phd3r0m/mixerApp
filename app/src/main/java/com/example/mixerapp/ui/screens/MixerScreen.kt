@@ -422,7 +422,7 @@ private fun MasterBusControls(
                 LimiterSlider(
                     label = "Threshold",
                     value = limiterConfig.thresholdDb,
-                    valueRange = -60f..0f,
+                    valueRange = -30f..0f,
                     unit = "dB",
                     onValueChange = { onLimiterConfigChange(limiterConfig.copy(thresholdDb = it)) }
                 )
