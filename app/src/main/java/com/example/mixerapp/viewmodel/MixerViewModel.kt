@@ -94,9 +94,6 @@ class MixerViewModel(
     private val _projectDurationMs = MutableStateFlow(0L)
     val projectDurationMs: StateFlow<Long> = _projectDurationMs.asStateFlow()
 
-    private val _activeMarkerName = MutableStateFlow<String?>(null)
-    val activeMarkerName: StateFlow<String?> = _activeMarkerName.asStateFlow()
-
     private val _isImportingProject = MutableStateFlow(false)
     val isImportingProject: StateFlow<Boolean> = _isImportingProject.asStateFlow()
 
@@ -254,8 +251,6 @@ class MixerViewModel(
                     resolveSourceFileUri(projectUri, track.sourceFile)
                 }
 
-                _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
-
                 if (persistLink) {
                     sessionProjectLinkStorage.save(
                         sessionId,
@@ -397,8 +392,6 @@ class MixerViewModel(
                 val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
                     resolveSourceFileInTree(track.sourceFile, indexedFiles)
                 }
-
-                _activeMarkerName.value = markerName?.takeIf { it.isNotBlank() }
 
                 if (persistLink) {
                     sessionProjectLinkStorage.save(
@@ -585,6 +578,43 @@ class MixerViewModel(
 
     fun toggleLimiter(enabled: Boolean) {
         updateLimiterConfig(_limiterConfig.value.copy(isEnabled = enabled))
+    }
+
+    fun saveProject() {
+        val link = sessionProjectLinkStorage.load(sessionId) ?: return
+        val projectUri = link.projectUri
+        val resolver = getApplication<Application>().contentResolver
+
+        viewModelScope.launch {
+            try {
+                // 1. Lire le contenu actuel
+                val originalContent = resolver.openInputStream(projectUri)?.bufferedReader()?.use { it.readText() }
+                    ?: throw IllegalStateException("Impossible de lire le projet pour sauvegarde")
+
+                // 2. Préparer les mises à jour
+                val currentTracks = _tracks.value
+                val updates = currentTracks.map { track ->
+                    ReaperProjectParser.TrackUpdate(
+                        volume = track.volume,
+                        pan = ReaperProjectParser.audioModeToPan(track.audioMode),
+                        isMuted = track.isMuted,
+                        isSolo = track.isSolo
+                    )
+                }
+
+                // 3. Générer le nouveau contenu
+                val newContent = ReaperProjectParser.updateProjectSettings(originalContent, updates)
+
+                // 4. Écrire le fichier (mode "rwt" pour s'assurer de l'écrasement complet)
+                resolver.openOutputStream(projectUri, "rwt")?.use { out ->
+                    out.write(newContent.toByteArray(Charsets.UTF_8))
+                }
+
+                _importMessage.value = "Réglages sauvegardés dans le fichier .rpp"
+            } catch (e: Exception) {
+                _importMessage.value = "Erreur lors de la sauvegarde : ${e.message}"
+            }
+        }
     }
 
     fun setMasterVolume(volume: Float) {

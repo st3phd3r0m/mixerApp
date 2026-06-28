@@ -1,6 +1,7 @@
 package com.example.mixerapp.data.reaper
 
 import com.example.mixerapp.model.AudioMode
+import java.util.Locale
 
 /** Donnees minimales extraites d'une piste Reaper compatibles avec le mixer. */
 data class ReaperTrackData(
@@ -207,6 +208,75 @@ object ReaperProjectParser {
         else -> AudioMode.STEREO
     }
 
+    fun audioModeToPan(mode: AudioMode): Float = when (mode) {
+        AudioMode.LEFT -> -1.0f
+        AudioMode.RIGHT -> 1.0f
+        AudioMode.STEREO -> 0.0f
+    }
+
+    data class TrackUpdate(
+        val volume: Float,
+        val pan: Float,
+        val isMuted: Boolean,
+        val isSolo: Boolean
+    )
+
+    fun updateProjectSettings(
+        content: String,
+        updates: List<TrackUpdate>
+    ): String {
+        val lines = content.lines().toMutableList()
+        var trackIndex = -1
+        var depthInsideTrack = 0
+
+        for (i in lines.indices) {
+            val line = lines[i]
+            val trimmed = line.trim()
+
+            // Détection de début de bloc
+            if (trimmed.startsWith("<")) {
+                if (trimmed.startsWith("<TRACK")) {
+                    trackIndex++
+                    depthInsideTrack = 1
+                } else if (depthInsideTrack > 0) {
+                    depthInsideTrack++
+                }
+                continue
+            }
+
+            // Détection de fin de bloc
+            if (trimmed == ">") {
+                if (depthInsideTrack > 0) {
+                    depthInsideTrack--
+                }
+                continue
+            }
+
+            // Modification uniquement si on est au premier niveau d'une piste
+            if (depthInsideTrack == 1) {
+                val update = updates.getOrNull(trackIndex) ?: continue
+                val indent = line.takeWhile { it.isWhitespace() }
+
+                if (trimmed.startsWith("VOLPAN ")) {
+                    val parts = trimmed.split(" ").filter { it.isNotBlank() }
+                    val v3 = parts.getOrNull(3) ?: "-1"
+                    val v4 = parts.getOrNull(4) ?: "-1"
+                    val v5 = parts.getOrNull(5) ?: "1"
+                    // Utilisation d'une haute précision pour Reaper
+                    lines[i] = "${indent}VOLPAN %.14f %.14f $v3 $v4 $v5".format(Locale.US, update.volume, update.pan)
+                } else if (trimmed.startsWith("MUTESOLO ")) {
+                    val mute = if (update.isMuted) 1 else 0
+                    val solo = if (update.isSolo) 1 else 0
+                    val parts = trimmed.split(" ").filter { it.isNotBlank() }
+                    val extra = parts.getOrNull(3) ?: "0"
+                    lines[i] = "${indent}MUTESOLO $mute $solo $extra"
+                }
+            }
+        }
+
+        return lines.joinToString("\n")
+    }
+
     private fun parseFieldValue(line: String, field: String): String? {
         val quoted = parseQuotedValue(line)
         if (!quoted.isNullOrBlank()) return quoted
@@ -288,4 +358,3 @@ object ReaperProjectParser {
         )
     }
 }
-

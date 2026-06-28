@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -57,7 +58,6 @@ fun MixerScreen(
     val playbackProgress by viewModel.playbackProgress.collectAsState()
     val projectPositionMs by viewModel.projectPositionMs.collectAsState()
     val projectDurationMs by viewModel.projectDurationMs.collectAsState()
-    val activeMarkerName by viewModel.activeMarkerName.collectAsState()
     val importMessage by viewModel.importMessage.collectAsState()
     val pendingProjectChoices by viewModel.pendingProjectChoices.collectAsState()
     val isImportingProject by viewModel.isImportingProject.collectAsState()
@@ -199,15 +199,19 @@ fun MixerScreen(
                 onMasterVolumeChange = viewModel::setMasterVolume
             )
 
-            HorizontalDivider(thickness = 2.dp, color = MaterialTheme.colorScheme.primary)
-
-            activeMarkerName?.let { marker ->
-                AssistChip(
-                    onClick = {},
-                    enabled = false,
-                    label = { Text(stringResource(R.string.active_segment_label, marker)) },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            Button(
+                onClick = viewModel::saveProject,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 )
+            ) {
+                Icon(Icons.Default.Save, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Sauvegarder réglages dans le .rpp")
             }
         }
     }
