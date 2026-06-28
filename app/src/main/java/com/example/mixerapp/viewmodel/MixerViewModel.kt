@@ -610,7 +610,7 @@ class MixerViewModel(
                     out.write(newContent.toByteArray(Charsets.UTF_8))
                 }
 
-                _importMessage.value = "Réglages sauvegardés dans le fichier .rpp"
+                _importMessage.value = "Done !"
             } catch (e: Exception) {
                 _importMessage.value = "Erreur lors de la sauvegarde : ${e.message}"
             }

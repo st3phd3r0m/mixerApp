@@ -211,7 +211,7 @@ fun MixerScreen(
             ) {
                 Icon(Icons.Default.Save, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Sauvegarder réglages dans le .rpp")
+                Text("Save in .rpp file")
             }
         }
     }
