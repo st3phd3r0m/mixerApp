@@ -45,7 +45,7 @@ fun SessionsScreen(
     val importProgressPercent by viewModel.importProgressPercent.collectAsState()
     var showDialog by remember { mutableStateOf(false) }
     var loadingSessionId by remember { mutableStateOf<Int?>(null) }
-    var loadingSessionProgress by remember { mutableStateOf(0) }
+    var loadingSessionProgress by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Navigation déclenchée après un court délai pour laisser le spinner s'afficher
@@ -62,7 +62,7 @@ fun SessionsScreen(
         }
 
         val session = sessions.firstOrNull { it.id == id }
-        if (session != null) onSessionClick(session)
+        session?.let { onSessionClick(it) }
         loadingSessionId = null
         loadingSessionProgress = 0
     }
@@ -176,10 +176,10 @@ fun SessionsScreen(
 
     if (showDialog) {
         AddSessionDialog(
-            onDismiss = { showDialog = false },
+            onDismiss = { if (showDialog) showDialog = false },
             onConfirm = { name ->
                 viewModel.addSession(name)
-                showDialog = false
+                if (showDialog) showDialog = false
             }
         )
     }

@@ -51,7 +51,7 @@ fun MixerScreen(
     val application = context.applicationContext as Application
     val viewModel: MixerViewModel = viewModel(
         key = "mixer_$sessionId",
-        factory = MixerViewModelFactory(application, sessionId, sessionName)
+        factory = MixerViewModelFactory(application, sessionId)
     )
 
     val tracks by viewModel.tracks.collectAsState()

@@ -11,8 +11,7 @@ data class ReaperTrackData(
     val isMuted: Boolean?,
     val isSolo: Boolean?,
     val sourceFile: String?,
-    val startOffsetSec: Double = 0.0,  // Offset de démarrage par rapport au début du marker
-    val loop: Boolean = false           // L'item est-il en boucle dans Reaper
+    val startOffsetSec: Double = 0.0  // Offset de démarrage par rapport au début du marker
 )
 
 data class ReaperMarkerData(
@@ -24,8 +23,7 @@ data class ReaperMarkerData(
 data class ReaperItemData(
     val positionSec: Double?,
     val lengthSec: Double?,
-    val sourceFile: String?,
-    val loop: Boolean = false
+    val sourceFile: String?
 )
 
 data class ReaperTrackProjectData(
@@ -149,11 +147,6 @@ object ReaperProjectParser {
                 currentItem?.lengthSec = line.removePrefix("LENGTH ").trim().toDoubleOrNull()
                 return@forEach
             }
-            if (itemDepth > 0 && line.startsWith("LOOP ")) {
-                currentItem?.loop = false
-                //line.removePrefix("LOOP ").trim().toIntOrNull()?.let { it != 0 } ?: false
-                return@forEach
-            }
             if (sourceWaveDepth > 0 && line.startsWith("FILE ")) {
                 val file = parseFieldValue(line, "FILE")
                 currentItem?.sourceFile = file
@@ -195,8 +188,7 @@ object ReaperProjectParser {
                 isMuted = track.isMuted,
                 isSolo = track.isSolo,
                 sourceFile = item?.sourceFile ?: track.items.firstNotNullOfOrNull { it.sourceFile },
-                startOffsetSec = startOffsetSec,
-                loop = item?.loop ?: false
+                startOffsetSec = startOffsetSec
             )
         }
     }
@@ -348,13 +340,11 @@ object ReaperProjectParser {
         var positionSec: Double? = null,
         var lengthSec: Double? = null,
         var sourceFile: String? = null,
-        var loop: Boolean = false,
     ) {
         fun toImmutable(): ReaperItemData = ReaperItemData(
             positionSec = positionSec,
             lengthSec = lengthSec,
             sourceFile = sourceFile,
-            loop = loop
         )
     }
 }

@@ -39,8 +39,7 @@ import kotlinx.coroutines.launch
 
 class MixerViewModel(
     application: Application,
-    val sessionId: Int,
-    val sessionName: String
+    val sessionId: Int
 ) : AndroidViewModel(application) {
 
     private data class MarkerRange(
@@ -447,8 +446,7 @@ class MixerViewModel(
                         uri = null,
                         isLoaded = false,
                         playbackError = null,
-                        startOffsetMs = (imported.startOffsetSec * 1000.0).toLong().coerceAtLeast(0L),
-                        loop = imported.loop
+                        startOffsetMs = (imported.startOffsetSec * 1000.0).toLong().coerceAtLeast(0L)
                     )
                 }
             }
@@ -456,8 +454,6 @@ class MixerViewModel(
 
         _tracks.value.forEachIndexed { index, track ->
             trackPlayers[index].processor.audioMode = track.audioMode
-            // Applique le mode répétition (LOOP=1 dans Reaper → REPEAT_MODE_ONE sur ExoPlayer)
-            trackPlayers[index].player.repeatMode = if (track.loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         }
 
         limited.forEachIndexed { index, track ->
@@ -574,10 +570,6 @@ class MixerViewModel(
         _limiterConfig.value = config
         // Update audio processors
         trackPlayers.forEach { it.processor.limiterConfig = config }
-    }
-
-    fun toggleLimiter(enabled: Boolean) {
-        updateLimiterConfig(_limiterConfig.value.copy(isEnabled = enabled))
     }
 
     fun saveProject() {
@@ -917,10 +909,9 @@ class MixerViewModel(
 // Factory pour injecter sessionId + sessionName sans Hilt
 class MixerViewModelFactory(
     private val application: Application,
-    private val sessionId: Int,
-    private val sessionName: String
+    private val sessionId: Int
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        MixerViewModel(application, sessionId, sessionName) as T
+        MixerViewModel(application, sessionId) as T
 }
