@@ -35,6 +35,8 @@ import com.example.mixerapp.model.LimiterConfiguration
 import com.example.mixerapp.model.TrackState
 import com.example.mixerapp.viewmodel.MixerViewModel
 import com.example.mixerapp.viewmodel.MixerViewModelFactory
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.pow
 import kotlin.math.log10
 
@@ -108,7 +110,14 @@ fun MixerScreen(
 
     LaunchedEffect(importMessage) {
         importMessage?.let { message ->
-            snackbarHostState.showSnackbar(message)
+            val job = launch {
+                snackbarHostState.showSnackbar(
+                    message = message,
+                    duration = SnackbarDuration.Indefinite
+                )
+            }
+            delay(1000)
+            job.cancel()
             viewModel.consumeImportMessage()
         }
     }

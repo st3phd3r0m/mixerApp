@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.mixerapp.model.Session
 import com.example.mixerapp.viewmodel.SessionsViewModel
@@ -83,7 +84,14 @@ fun SessionsScreen(
 
     LaunchedEffect(importMessage) {
         importMessage?.let { message ->
-            snackbarHostState.showSnackbar(message)
+            val job = launch {
+                snackbarHostState.showSnackbar(
+                    message = message,
+                    duration = SnackbarDuration.Indefinite
+                )
+            }
+            delay(1000)
+            job.cancel()
             viewModel.consumeImportMessage()
         }
     }
