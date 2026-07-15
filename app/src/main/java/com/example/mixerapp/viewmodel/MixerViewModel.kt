@@ -542,12 +542,12 @@ class MixerViewModel(
                         out.flush()
                     }
                     _importMessage.value = "Done !"
-                } catch (e: SecurityException) {
+                } catch (_: SecurityException) {
                     _importMessage.value = "Erreur de permission: Impossible d'écrire dans le fichier. Vérifiez que l'application a les permissions nécessaires."
                 } catch (e: Exception) {
                     _importMessage.value = "Erreur lors de la sauvegarde: ${e.message ?: "erreur inconnue"}"
                 }
-            } catch (e: SecurityException) {
+            } catch (_: SecurityException) {
                 _importMessage.value = "Erreur de permission: Impossible d'accéder au fichier. Vérifiez que l'application a les permissions nécessaires."
             } catch (e: Exception) {
                 _importMessage.value = "Erreur lors de la sauvegarde : ${e.message}"
