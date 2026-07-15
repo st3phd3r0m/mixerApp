@@ -278,40 +278,6 @@ class MixerViewModel(
         }
     }
 
-    fun importReaperProjectFromFolder(folderUri: Uri) {
-        viewModelScope.launch {
-            val resolver = getApplication<Application>().contentResolver
-            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
-            if (root == null || !root.isDirectory) {
-                _importMessage.value = "Dossier invalide"
-                return@launch
-            }
-
-            val projectFiles = findProjectFiles(root)
-            if (projectFiles.isEmpty()) {
-                _importMessage.value = "Aucun fichier .rpp trouve dans le dossier"
-                return@launch
-            }
-
-            if (projectFiles.size > 1) {
-                _pendingProjectChoices.value = projectFiles
-                    .sortedBy { it.relativePath.lowercase() }
-                    .map {
-                        PendingProjectChoice(
-                            name = it.file.name ?: "projet.rpp",
-                            relativePath = it.relativePath,
-                            projectUri = it.file.uri,
-                            folderUri = folderUri
-                        )
-                    }
-                _importMessage.value = "Plusieurs projets detectes: choisis le .rpp"
-                return@launch
-            }
-
-            importReaperProjectDocument(root, projectFiles.first().file, resolver)
-        }
-    }
-
     fun chooseProjectFromFolder(
         projectUri: Uri,
         folderUri: Uri,
