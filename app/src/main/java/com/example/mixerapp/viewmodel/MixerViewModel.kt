@@ -468,29 +468,6 @@ class MixerViewModel(
         }
     }
 
-    private fun findProjectFiles(root: DocumentFile): List<ProjectCandidate> {
-        val result = mutableListOf<ProjectCandidate>()
-        val stack = ArrayDeque<Pair<DocumentFile, String>>()
-        stack.add(root to "")
-
-        while (stack.isNotEmpty()) {
-            val (current, relBase) = stack.removeFirst()
-            current.listFiles().forEach { child ->
-                val childName = child.name ?: return@forEach
-                val relPath = if (relBase.isEmpty()) childName else "$relBase/$childName"
-
-                when {
-                    child.isDirectory -> stack.add(child to relPath)
-                    child.isFile && childName.endsWith(".rpp", ignoreCase = true) -> {
-                        result += ProjectCandidate(child, relPath)
-                    }
-                }
-            }
-        }
-
-        return result
-    }
-
     private fun buildAudioIndex(root: DocumentFile): Map<String, Uri> {
         val index = mutableMapOf<String, Uri>()
         val stack = ArrayDeque<DocumentFile>()
