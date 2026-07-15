@@ -151,11 +151,6 @@ fun MixerScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Retour")
                     }
                 },
-                actions = {
-                    IconButton(onClick = openProjectExplorer) {
-                        Icon(Icons.Default.FileOpen, contentDescription = "Importer session")
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
