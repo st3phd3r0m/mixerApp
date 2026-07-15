@@ -38,7 +38,7 @@ fun SessionsScreen(
     val isImportingProject by viewModel.isImportingProject.collectAsState()
     val importProgressPercent by viewModel.importProgressPercent.collectAsState()
     var showDialog by remember { mutableStateOf(false) }
-    var showExplorer by remember { mutableStateOf(false) }
+    val showExplorerState = remember { mutableStateOf(false) }
     var preferredExplorerRoot by remember { mutableStateOf<Uri?>(null) }
     var persistedTreeUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var loadingSessionId by remember { mutableStateOf<Int?>(null) }
@@ -62,7 +62,7 @@ fun SessionsScreen(
     val openCustomExplorer = {
         refreshPersistedTreeUris()
         preferredExplorerRoot = persistedTreeUris.firstOrNull()
-        showExplorer = true
+        showExplorerState.value = true
     }
 
     // Navigation déclenchée après un court délai pour laisser le spinner s'afficher
@@ -94,7 +94,7 @@ fun SessionsScreen(
             }
             refreshPersistedTreeUris()
             preferredExplorerRoot = it
-            showExplorer = true
+            showExplorerState.value = true
         }
     }
 
@@ -195,15 +195,15 @@ fun SessionsScreen(
         )
     }
 
-    if (showExplorer) {
+    if (showExplorerState.value) {
         CustomFileExplorerDialog(
             usage = ExplorerUsage.SessionsReaper,
             persistedTreeUris = persistedTreeUris,
             preferredRootUri = preferredExplorerRoot,
-            onDismiss = { showExplorer = false },
+            onDismiss = { showExplorerState.value = false },
             onRequestRootAccess = { folderImportLauncher.launch(null) },
             onSelect = { selectedFolderUri, _ ->
-                showExplorer = false
+                showExplorerState.value = false
                 viewModel.startImportProgressNow()
                 viewModel.importSessionFromReaperFolderWithDelay(selectedFolderUri)
             }
