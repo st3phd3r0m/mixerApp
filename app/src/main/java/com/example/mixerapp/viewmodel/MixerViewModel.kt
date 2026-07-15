@@ -246,6 +246,12 @@ class MixerViewModel(
                     trackPlayers.forEach { it.processor.masterVolume = masterVol }
                 }
 
+                // Charger la configuration du limiteur depuis le projet
+                project.limiterConfig?.let { config ->
+                    _limiterConfig.value = config
+                    trackPlayers.forEach { it.processor.limiterConfig = config }
+                }
+
                 updateImportProgress(35)
 
                 val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
@@ -358,6 +364,12 @@ class MixerViewModel(
                 project.masterVolume?.let { masterVol ->
                     _masterVolume.value = masterVol
                     trackPlayers.forEach { it.processor.masterVolume = masterVol }
+                }
+
+                // Charger la configuration du limiteur depuis le projet
+                project.limiterConfig?.let { config ->
+                    _limiterConfig.value = config
+                    trackPlayers.forEach { it.processor.limiterConfig = config }
                 }
 
                 updateImportProgress(35)
@@ -546,11 +558,12 @@ class MixerViewModel(
                     )
                 }
 
-                // 3. Générer le nouveau contenu (incluant master volume)
+                // 3. Générer le nouveau contenu (incluant master volume et limiter)
                 val newContent = ReaperProjectParser.updateProjectSettings(
                     originalContent,
                     updates,
-                    masterVolume = _masterVolume.value
+                    masterVolume = _masterVolume.value,
+                    limiterConfig = _limiterConfig.value
                 )
                 // 4. Écrire le fichier avec gestion des permissions
                 try {

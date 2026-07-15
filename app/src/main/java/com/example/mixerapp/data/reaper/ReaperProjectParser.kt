@@ -1,6 +1,7 @@
 package com.example.mixerapp.data.reaper
 
 import com.example.mixerapp.model.AudioMode
+import com.example.mixerapp.model.LimiterConfiguration
 import java.util.Locale
 
 /** Donnees minimales extraites d'une piste Reaper compatibles avec le mixer. */
@@ -38,7 +39,8 @@ data class ReaperTrackProjectData(
 data class ReaperProjectData(
     val markers: List<ReaperMarkerData>,
     val tracks: List<ReaperTrackProjectData>,
-    val masterVolume: Float? = null
+    val masterVolume: Float? = null,
+    val limiterConfig: LimiterConfiguration? = null
 )
 
 data class ReaperMarkerSlice(
@@ -68,17 +70,20 @@ object ReaperProjectParser {
         val result = mutableListOf<ReaperTrackProjectData>()
         val markers = mutableListOf<ReaperMarkerData>()
         var masterVolume: Float? = null
+        var limiterConfig: LimiterConfiguration? = null
         var current: MutableTrack? = null
         var currentItem: MutableItem? = null
         var trackDepth = 0
         var itemDepth = 0
         var sourceWaveDepth = 0
+        var limiterDepth = 0
+        var tempLimiter = MutableLimiter()
 
         content.lineSequence().forEach { raw ->
             val line = raw.trim()
             if (line.isEmpty()) return@forEach
 
-            if (current == null) {
+            if (current == null && limiterDepth == 0) {
                 parseMarker(line)?.let { markers += it }
                 if (line.startsWith("MASTER_VOLUME ")) {
                     masterVolume = parseMasterVolume(line)
@@ -86,6 +91,10 @@ object ReaperProjectParser {
                 if (line.startsWith("<TRACK ")) {
                     current = MutableTrack()
                     trackDepth = 1
+                }
+                if (line.startsWith("<MASTERLIMITER")) {
+                    limiterDepth = 1
+                    tempLimiter = MutableLimiter()
                 }
                 return@forEach
             }
@@ -100,50 +109,73 @@ object ReaperProjectParser {
                         currentItem?.let { trackRef.items += it.toImmutable() }
                         currentItem = null
                     }
-                }
-                trackDepth--
-                if (trackDepth == 0) {
-                    if (itemDepth > 0) {
-                        val trackRef = current ?: return@forEach
-                        currentItem?.let { trackRef.items += it.toImmutable() }
-                        currentItem = null
-                        itemDepth = 0
+                } else if (limiterDepth > 0) {
+                    limiterDepth--
+                    if (limiterDepth == 0) {
+                        limiterConfig = tempLimiter.toImmutable()
                     }
-                    result += current.toProjectData()
-                    current = null
                 }
+                
+                    if (trackDepth > 0) {
+                        trackDepth--
+                        if (trackDepth == 0) {
+                            if (itemDepth > 0) {
+                                val trackRef = current ?: return@forEach
+                                currentItem?.let { trackRef.items += it.toImmutable() }
+                                currentItem = null
+                                itemDepth = 0
+                            }
+                            current?.let { result += it.toProjectData() }
+                            current = null
+                        }
+                    }
                 return@forEach
             }
 
             if (line.startsWith("<")) {
-                trackDepth++
-                if (line.startsWith("<ITEM")) {
-                    itemDepth++
-                    currentItem = MutableItem()
-                }
-                if (line.startsWith("<SOURCE WAVE")) {
-                    sourceWaveDepth = 1
+                if (limiterDepth > 0) {
+                    limiterDepth++
+                } else if (trackDepth > 0) {
+                    trackDepth++
+                    if (line.startsWith("<ITEM")) {
+                        itemDepth++
+                        currentItem = MutableItem()
+                    }
+                    if (line.startsWith("<SOURCE WAVE")) {
+                        sourceWaveDepth = 1
+                    }
                 }
                 return@forEach
             }
 
+            if (limiterDepth == 1) {
+                if (line.startsWith("ENABLED ")) tempLimiter.isEnabled = line.substringAfter(" ").toIntOrNull() == 1
+                if (line.startsWith("THRESHOLD ")) tempLimiter.thresholdDb = line.substringAfter(" ").toFloatOrNull() ?: 0f
+                if (line.startsWith("CEILING ")) tempLimiter.ceilingDb = line.substringAfter(" ").toFloatOrNull() ?: 0f
+                if (line.startsWith("RELEASE ")) tempLimiter.releaseMs = line.substringAfter(" ").toFloatOrNull() ?: 50f
+                return@forEach
+            }
+
             val track = current
-            if (track.name == null && line.startsWith("NAME ")) {
-                track.name = parseFieldValue(line, "NAME")
-                return@forEach
+            if (track != null && trackDepth == 1) {
+                if (track.name == null && line.startsWith("NAME ")) {
+                    track.name = parseFieldValue(line, "NAME")
+                    return@forEach
+                }
+                if (track.volume == null && line.startsWith("VOLPAN ")) {
+                    val parts = line.split(" ").filter { it.isNotBlank() }
+                    track.volume = parts.getOrNull(1)?.toFloatOrNull()
+                    track.pan = parts.getOrNull(2)?.toFloatOrNull()
+                    return@forEach
+                }
+                if (track.isMuted == null && line.startsWith("MUTESOLO ")) {
+                    val parts = line.split(" ").filter { it.isNotBlank() }
+                    track.isMuted = parts.getOrNull(1)?.toIntOrNull()?.let { it != 0 }
+                    track.isSolo = parts.getOrNull(2)?.toIntOrNull()?.let { it != 0 }
+                    return@forEach
+                }
             }
-            if (track.volume == null && line.startsWith("VOLPAN ")) {
-                val parts = line.split(" ").filter { it.isNotBlank() }
-                track.volume = parts.getOrNull(1)?.toFloatOrNull()
-                track.pan = parts.getOrNull(2)?.toFloatOrNull()
-                return@forEach
-            }
-            if (track.isMuted == null && line.startsWith("MUTESOLO ")) {
-                val parts = line.split(" ").filter { it.isNotBlank() }
-                track.isMuted = parts.getOrNull(1)?.toIntOrNull()?.let { it != 0 }
-                track.isSolo = parts.getOrNull(2)?.toIntOrNull()?.let { it != 0 }
-                return@forEach
-            }
+
             if (itemDepth > 0 && line.startsWith("POSITION ")) {
                 currentItem?.positionSec = line.removePrefix("POSITION ").trim().toDoubleOrNull()
                 return@forEach
@@ -161,7 +193,8 @@ object ReaperProjectParser {
         return ReaperProjectData(
             markers = markers.sortedBy { it.positionSec },
             tracks = result,
-            masterVolume = masterVolume
+            masterVolume = masterVolume,
+            limiterConfig = limiterConfig
         )
     }
 
@@ -222,11 +255,27 @@ object ReaperProjectParser {
     fun updateProjectSettings(
         content: String,
         updates: List<TrackUpdate>,
-        masterVolume: Float? = null
+        masterVolume: Float? = null,
+        limiterConfig: LimiterConfiguration? = null
     ): String {
         val lines = content.lines().toMutableList()
         var trackIndex = -1
         var depthInsideTrack = 0
+        var limiterFound = false
+
+        // Suppression de l'ancien bloc MASTERLIMITER s'il existe pour le réécrire proprement
+        val iterator = lines.iterator()
+        var inLimiter = false
+        val newLines = mutableListOf<String>()
+        while (iterator.hasNext()) {
+            val line = iterator.next()
+            val trimmed = line.trim()
+            if (trimmed.startsWith("<MASTERLIMITER")) inLimiter = true
+            if (!inLimiter) newLines.add(line)
+            if (inLimiter && trimmed == ">") inLimiter = false
+        }
+        lines.clear()
+        lines.addAll(newLines)
 
         for (i in lines.indices) {
             val line = lines[i]
@@ -251,16 +300,27 @@ object ReaperProjectParser {
                 continue
             }
 
-            // Mise à jour du MASTER_VOLUME au niveau global
-            if (masterVolume != null && trimmed.startsWith("MASTER_VOLUME ")) {
+            // Mise à jour du MASTER_VOLUME au niveau global et insertion du MASTERLIMITER juste après
+            if (trimmed.startsWith("MASTER_VOLUME ")) {
                 val parts = trimmed.split(" ").filter { it.isNotBlank() }
                 val v2 = parts.getOrNull(2) ?: "0"
                 val v3 = parts.getOrNull(3) ?: "-1"
                 val v4 = parts.getOrNull(4) ?: "-1"
                 val v5 = parts.getOrNull(5) ?: "1"
                 val indent = line.takeWhile { it.isWhitespace() }
-                // Utilisation d'une haute précision pour Reaper
-                lines[i] = "${indent}MASTER_VOLUME %.14f $v2 $v3 $v4 $v5".format(Locale.US, masterVolume)
+                lines[i] = "${indent}MASTER_VOLUME %.14f $v2 $v3 $v4 $v5".format(Locale.US, masterVolume ?: parseMasterVolume(trimmed) ?: 1.0f)
+                
+                if (limiterConfig != null && !limiterFound) {
+                    val limiterBlock = StringBuilder()
+                    limiterBlock.append("${indent}<MASTERLIMITER\n")
+                    limiterBlock.append("${indent}  ENABLED ${if (limiterConfig.isEnabled) 1 else 0}\n")
+                    limiterBlock.append("${indent}  THRESHOLD %.2f\n".format(Locale.US, limiterConfig.thresholdDb))
+                    limiterBlock.append("${indent}  CEILING %.2f\n".format(Locale.US, limiterConfig.ceilingDb))
+                    limiterBlock.append("${indent}  RELEASE %.1f\n".format(Locale.US, limiterConfig.releaseMs))
+                    limiterBlock.append("${indent}>")
+                    lines[i] = lines[i] + "\n" + limiterBlock.toString()
+                    limiterFound = true
+                }
                 continue
             }
 
@@ -284,6 +344,16 @@ object ReaperProjectParser {
                     lines[i] = "${indent}MUTESOLO $mute $solo $extra"
                 }
             }
+        }
+
+        // Si MASTER_VOLUME n'a pas été trouvé, on ajoute le bloc à la fin (peu probable dans un RPP valide)
+        if (limiterConfig != null && !limiterFound) {
+            lines.add("<MASTERLIMITER")
+            lines.add("  ENABLED ${if (limiterConfig.isEnabled) 1 else 0}")
+            lines.add("  THRESHOLD %.2f".format(Locale.US, limiterConfig.thresholdDb))
+            lines.add("  CEILING %.2f".format(Locale.US, limiterConfig.ceilingDb))
+            lines.add("  RELEASE %.1f".format(Locale.US, limiterConfig.releaseMs))
+            lines.add(">")
         }
 
         return lines.joinToString("\n")
@@ -371,6 +441,20 @@ object ReaperProjectParser {
             positionSec = positionSec,
             lengthSec = lengthSec,
             sourceFile = sourceFile,
+        )
+    }
+
+    private data class MutableLimiter(
+        var isEnabled: Boolean = false,
+        var thresholdDb: Float = 0f,
+        var ceilingDb: Float = 0f,
+        var releaseMs: Float = 50f
+    ) {
+        fun toImmutable(): LimiterConfiguration = LimiterConfiguration(
+            isEnabled = isEnabled,
+            thresholdDb = thresholdDb,
+            ceilingDb = ceilingDb,
+            releaseMs = releaseMs
         )
     }
 }
