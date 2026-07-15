@@ -239,6 +239,13 @@ class MixerViewModel(
                     _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
                     return@launch
                 }
+
+                // Charger le master volume depuis le projet
+                project.masterVolume?.let { masterVol ->
+                    _masterVolume.value = masterVol
+                    trackPlayers.forEach { it.processor.masterVolume = masterVol }
+                }
+
                 updateImportProgress(35)
 
                 val loadedAudioCount = applyImportedSession(parsedTracks) { _, track ->
@@ -346,6 +353,13 @@ class MixerViewModel(
                     _importMessage.value = "Aucune piste exploitable trouvee dans ce projet"
                     return@launch
                 }
+
+                // Charger le master volume depuis le projet
+                project.masterVolume?.let { masterVol ->
+                    _masterVolume.value = masterVol
+                    trackPlayers.forEach { it.processor.masterVolume = masterVol }
+                }
+
                 updateImportProgress(35)
 
                 val indexedFiles = buildAudioIndex(root)
@@ -532,9 +546,12 @@ class MixerViewModel(
                     )
                 }
 
-                // 3. Générer le nouveau contenu
-                val newContent = ReaperProjectParser.updateProjectSettings(originalContent, updates)
-
+                // 3. Générer le nouveau contenu (incluant master volume)
+                val newContent = ReaperProjectParser.updateProjectSettings(
+                    originalContent,
+                    updates,
+                    masterVolume = _masterVolume.value
+                )
                 // 4. Écrire le fichier avec gestion des permissions
                 try {
                     resolver.openOutputStream(projectUri, "rwt")?.use { out ->

@@ -37,7 +37,8 @@ data class ReaperTrackProjectData(
 
 data class ReaperProjectData(
     val markers: List<ReaperMarkerData>,
-    val tracks: List<ReaperTrackProjectData>
+    val tracks: List<ReaperTrackProjectData>,
+    val masterVolume: Float? = null
 )
 
 data class ReaperMarkerSlice(
@@ -66,6 +67,7 @@ object ReaperProjectParser {
     fun parseProject(content: String): ReaperProjectData {
         val result = mutableListOf<ReaperTrackProjectData>()
         val markers = mutableListOf<ReaperMarkerData>()
+        var masterVolume: Float? = null
         var current: MutableTrack? = null
         var currentItem: MutableItem? = null
         var trackDepth = 0
@@ -78,6 +80,9 @@ object ReaperProjectParser {
 
             if (current == null) {
                 parseMarker(line)?.let { markers += it }
+                if (line.startsWith("MASTER_VOLUME ")) {
+                    masterVolume = parseMasterVolume(line)
+                }
                 if (line.startsWith("<TRACK ")) {
                     current = MutableTrack()
                     trackDepth = 1
@@ -155,7 +160,8 @@ object ReaperProjectParser {
 
         return ReaperProjectData(
             markers = markers.sortedBy { it.positionSec },
-            tracks = result
+            tracks = result,
+            masterVolume = masterVolume
         )
     }
 
@@ -215,7 +221,8 @@ object ReaperProjectParser {
 
     fun updateProjectSettings(
         content: String,
-        updates: List<TrackUpdate>
+        updates: List<TrackUpdate>,
+        masterVolume: Float? = null
     ): String {
         val lines = content.lines().toMutableList()
         var trackIndex = -1
@@ -241,6 +248,19 @@ object ReaperProjectParser {
                 if (depthInsideTrack > 0) {
                     depthInsideTrack--
                 }
+                continue
+            }
+
+            // Mise à jour du MASTER_VOLUME au niveau global
+            if (masterVolume != null && trimmed.startsWith("MASTER_VOLUME ")) {
+                val parts = trimmed.split(" ").filter { it.isNotBlank() }
+                val v2 = parts.getOrNull(2) ?: "0"
+                val v3 = parts.getOrNull(3) ?: "-1"
+                val v4 = parts.getOrNull(4) ?: "-1"
+                val v5 = parts.getOrNull(5) ?: "1"
+                val indent = line.takeWhile { it.isWhitespace() }
+                // Utilisation d'une haute précision pour Reaper
+                lines[i] = "${indent}MASTER_VOLUME %.14f $v2 $v3 $v4 $v5".format(Locale.US, masterVolume)
                 continue
             }
 
@@ -298,6 +318,12 @@ object ReaperProjectParser {
             .trim()
         val name = parseLeadingValue(remainder)?.takeIf { it.isNotBlank() } ?: "Marker $index"
         return ReaperMarkerData(index = index, positionSec = position, name = name)
+    }
+
+    private fun parseMasterVolume(line: String): Float? {
+        if (!line.startsWith("MASTER_VOLUME ")) return null
+        val parts = line.split(" ").filter { it.isNotBlank() }
+        return parts.getOrNull(1)?.toFloatOrNull()
     }
 
     private fun parseLeadingValue(text: String): String? {
