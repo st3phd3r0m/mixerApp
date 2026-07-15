@@ -517,7 +517,7 @@ class MixerViewModel(
 
         viewModelScope.launch {
             try {
-                // 1. Lire le contenu actuel
+                // 1. Vérifier que le fichier est accessible
                 val originalContent = resolver.openInputStream(projectUri)?.bufferedReader()?.use { it.readText() }
                     ?: throw IllegalStateException("Impossible de lire le projet pour sauvegarde")
 
@@ -535,12 +535,20 @@ class MixerViewModel(
                 // 3. Générer le nouveau contenu
                 val newContent = ReaperProjectParser.updateProjectSettings(originalContent, updates)
 
-                // 4. Écrire le fichier (mode "rwt" pour s'assurer de l'écrasement complet)
-                resolver.openOutputStream(projectUri, "rwt")?.use { out ->
-                    out.write(newContent.toByteArray(Charsets.UTF_8))
+                // 4. Écrire le fichier avec gestion des permissions
+                try {
+                    resolver.openOutputStream(projectUri, "rwt")?.use { out ->
+                        out.write(newContent.toByteArray(Charsets.UTF_8))
+                        out.flush()
+                    }
+                    _importMessage.value = "Done !"
+                } catch (e: SecurityException) {
+                    _importMessage.value = "Erreur de permission: Impossible d'écrire dans le fichier. Vérifiez que l'application a les permissions nécessaires."
+                } catch (e: Exception) {
+                    _importMessage.value = "Erreur lors de la sauvegarde: ${e.message ?: "erreur inconnue"}"
                 }
-
-                _importMessage.value = "Done !"
+            } catch (e: SecurityException) {
+                _importMessage.value = "Erreur de permission: Impossible d'accéder au fichier. Vérifiez que l'application a les permissions nécessaires."
             } catch (e: Exception) {
                 _importMessage.value = "Erreur lors de la sauvegarde : ${e.message}"
             }

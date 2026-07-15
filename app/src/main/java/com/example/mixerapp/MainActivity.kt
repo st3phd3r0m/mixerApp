@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -17,11 +18,23 @@ import androidx.navigation.navArgument
 import com.example.mixerapp.ui.screens.MixerScreen
 import com.example.mixerapp.ui.screens.SessionsScreen
 import com.example.mixerapp.ui.theme.MixerAppTheme
+import com.example.mixerapp.utils.PermissionUtils
 
 class MainActivity : ComponentActivity() {
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { /* Permissions gérées automatiquement */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Demander les permissions pour accéder aux fichiers
+        if (!PermissionUtils.hasAllPermissions(this)) {
+            permissionLauncher.launch(PermissionUtils.getRequiredPermissions().toTypedArray())
+        }
+
         setContent {
             MixerAppTheme {
                 Surface(
