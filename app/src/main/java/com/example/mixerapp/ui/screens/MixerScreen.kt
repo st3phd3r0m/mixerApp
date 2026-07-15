@@ -81,18 +81,6 @@ fun MixerScreen(
         }
     }
 
-    val folderImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    it,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            viewModel.importReaperProjectFromFolder(it)
-        }
-    }
-
     // Un launcher par piste (doit être créé au niveau Composable, pas dans une lambda)
     val fileLaunchers = (0 until MixerViewModel.TRACK_COUNT).map { trackId ->
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -135,9 +123,6 @@ fun MixerScreen(
                 actions = {
                     IconButton(onClick = { sessionImportLauncher.launch(arrayOf("*/*")) }) {
                         Icon(Icons.Default.FileOpen, contentDescription = "Importer session")
-                    }
-                    IconButton(onClick = { folderImportLauncher.launch(null) }) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = "Importer dossier session")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
