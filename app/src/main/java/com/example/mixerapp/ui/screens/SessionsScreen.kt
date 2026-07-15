@@ -124,11 +124,25 @@ fun SessionsScreen(
                             .padding(horizontal = 16.dp, vertical = 32.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            "Aucune session.\nAppuyez sur + pour en créer une.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                "Aucune session.\nAppuyez sur + pour en créer une, ou importez un projet Reaper.",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Button(onClick = { folderImportLauncher.launch(null) }) {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Importer un projet Reaper")
+                            }
+                        }
                     }
                 }
             } else {
