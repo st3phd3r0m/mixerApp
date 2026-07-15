@@ -2,6 +2,7 @@ package com.example.mixerapp.ui.screens
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -68,8 +69,47 @@ fun MixerScreen(
     val limiterConfig by viewModel.limiterConfig.collectAsState()
     val masterVolume by viewModel.masterVolume.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    var showExplorer by remember { mutableStateOf(false) }
+    var explorerUsage by remember { mutableStateOf(ExplorerUsage.MixerProject) }
+    var activeTrackForExplorer by remember { mutableStateOf<Int?>(null) }
+    var preferredExplorerRoot by remember { mutableStateOf<Uri?>(null) }
+    var persistedTreeUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
-    val sessionImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val refreshPersistedTreeUris = {
+        persistedTreeUris = context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isReadPermission }
+            .mapNotNull { permission ->
+                runCatching { androidx.documentfile.provider.DocumentFile.fromTreeUri(context, permission.uri) }
+                    .getOrNull()
+                    ?.takeIf { it.isDirectory }
+                    ?.uri
+            }
+            .distinct()
+            .toList()
+    }
+
+    val openProjectExplorer = {
+        refreshPersistedTreeUris()
+        preferredExplorerRoot = persistedTreeUris.firstOrNull()
+        activeTrackForExplorer = null
+        explorerUsage = ExplorerUsage.MixerProject
+        showExplorer = true
+    }
+
+    fun openAudioExplorer(trackId: Int) {
+        refreshPersistedTreeUris()
+        preferredExplorerRoot = persistedTreeUris.firstOrNull()
+        activeTrackForExplorer = trackId
+        explorerUsage = ExplorerUsage.MixerAudio
+        showExplorer = true
+    }
+
+    fun hideExplorer() {
+        showExplorer = false
+    }
+
+    val rootAccessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
@@ -77,23 +117,14 @@ fun MixerScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            viewModel.importReaperProject(it)
+            refreshPersistedTreeUris()
+            preferredExplorerRoot = it
+            showExplorer = true
         }
     }
 
-    // Un launcher par piste (doit être créé au niveau Composable, pas dans une lambda)
-    val fileLaunchers = (0 until MixerViewModel.TRACK_COUNT).map { trackId ->
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            uri?.let {
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        it,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                }
-                viewModel.loadAudio(trackId, it)
-            }
-        }
+    LaunchedEffect(Unit) {
+        refreshPersistedTreeUris()
     }
 
     LaunchedEffect(importMessage) {
@@ -121,7 +152,7 @@ fun MixerScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { sessionImportLauncher.launch(arrayOf("*/*")) }) {
+                    IconButton(onClick = openProjectExplorer) {
                         Icon(Icons.Default.FileOpen, contentDescription = "Importer session")
                     }
                 },
@@ -176,7 +207,7 @@ fun MixerScreen(
             tracks.take(visibleTrackCount).forEach { track ->
                 TrackRow(
                     track = track,
-                    onLoadClick = { fileLaunchers[track.id].launch(arrayOf("audio/*")) },
+                    onLoadClick = { openAudioExplorer(track.id) },
                     onVolumeChange = { viewModel.setVolume(track.id, it) },
                     onToggleMute = { viewModel.toggleMute(track.id) },
                     onToggleSolo = { viewModel.toggleSolo(track.id) },
@@ -208,6 +239,33 @@ fun MixerScreen(
                 Text("Save in .rpp file")
             }
         }
+    }
+
+    if (showExplorer) {
+        CustomFileExplorerDialog(
+            usage = explorerUsage,
+            persistedTreeUris = persistedTreeUris,
+            preferredRootUri = preferredExplorerRoot,
+            onDismiss = ::hideExplorer,
+            onRequestRootAccess = { rootAccessLauncher.launch(null) },
+            onSelect = { selectedUri, currentFolderUri ->
+                hideExplorer()
+                when (explorerUsage) {
+                    ExplorerUsage.MixerProject -> {
+                        val folderUri = currentFolderUri
+                        if (folderUri != null) {
+                            viewModel.chooseProjectFromFolder(selectedUri, folderUri)
+                        } else {
+                            viewModel.importReaperProject(selectedUri)
+                        }
+                    }
+                    ExplorerUsage.MixerAudio -> activeTrackForExplorer?.let { trackId ->
+                        viewModel.loadAudio(trackId, selectedUri)
+                    }
+                    ExplorerUsage.SessionsReaper -> Unit
+                }
+            }
+        )
     }
 
     if (pendingProjectChoices.isNotEmpty()) {

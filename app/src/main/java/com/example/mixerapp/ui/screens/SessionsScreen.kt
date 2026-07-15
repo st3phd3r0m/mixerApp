@@ -1,6 +1,7 @@
 package com.example.mixerapp.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,9 +38,32 @@ fun SessionsScreen(
     val isImportingProject by viewModel.isImportingProject.collectAsState()
     val importProgressPercent by viewModel.importProgressPercent.collectAsState()
     var showDialog by remember { mutableStateOf(false) }
+    var showExplorer by remember { mutableStateOf(false) }
+    var preferredExplorerRoot by remember { mutableStateOf<Uri?>(null) }
+    var persistedTreeUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var loadingSessionId by remember { mutableStateOf<Int?>(null) }
     var loadingSessionProgress by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val refreshPersistedTreeUris = {
+        persistedTreeUris = context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isReadPermission }
+            .mapNotNull { permission ->
+                runCatching { androidx.documentfile.provider.DocumentFile.fromTreeUri(context, permission.uri) }
+                    .getOrNull()
+                    ?.takeIf { it.isDirectory }
+                    ?.uri
+            }
+            .distinct()
+            .toList()
+    }
+
+    val openCustomExplorer = {
+        refreshPersistedTreeUris()
+        preferredExplorerRoot = persistedTreeUris.firstOrNull()
+        showExplorer = true
+    }
 
     // Navigation déclenchée après un court délai pour laisser le spinner s'afficher
     LaunchedEffect(loadingSessionId) {
@@ -68,11 +92,14 @@ fun SessionsScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            // Afficher le spinner immédiatement sur le main thread (avant fermeture du picker)
-            viewModel.startImportProgressNow()
-            // Lancer l'import avec délai pour laisser Compose recomposer
-            viewModel.importSessionFromReaperFolderWithDelay(it)
+            refreshPersistedTreeUris()
+            preferredExplorerRoot = it
+            showExplorer = true
         }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshPersistedTreeUris()
     }
 
     LaunchedEffect(importMessage) {
@@ -95,7 +122,7 @@ fun SessionsScreen(
             TopAppBar(
                 title = { Text("🎛  MixerApp — Sessions") },
                 actions = {
-                    IconButton(onClick = { folderImportLauncher.launch(null) }) {
+                    IconButton(onClick = openCustomExplorer) {
                         Icon(Icons.Default.FolderOpen, contentDescription = "Importer dossier Reaper")
                     }
                 },
@@ -133,7 +160,7 @@ fun SessionsScreen(
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Button(onClick = { folderImportLauncher.launch(null) }) {
+                            Button(onClick = openCustomExplorer) {
                                 Icon(
                                     imageVector = Icons.Default.FolderOpen,
                                     contentDescription = null,
@@ -164,6 +191,21 @@ fun SessionsScreen(
             onConfirm = { name ->
                 viewModel.addSession(name)
                 if (showDialog) showDialog = false
+            }
+        )
+    }
+
+    if (showExplorer) {
+        CustomFileExplorerDialog(
+            usage = ExplorerUsage.SessionsReaper,
+            persistedTreeUris = persistedTreeUris,
+            preferredRootUri = preferredExplorerRoot,
+            onDismiss = { showExplorer = false },
+            onRequestRootAccess = { folderImportLauncher.launch(null) },
+            onSelect = { selectedFolderUri, _ ->
+                showExplorer = false
+                viewModel.startImportProgressNow()
+                viewModel.importSessionFromReaperFolderWithDelay(selectedFolderUri)
             }
         )
     }
