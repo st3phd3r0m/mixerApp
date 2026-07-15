@@ -62,11 +62,6 @@ class MixerViewModel(
         val folderUri: Uri
     )
 
-    private data class ProjectCandidate(
-        val file: DocumentFile,
-        val relativePath: String
-    )
-
     companion object {
         const val TRACK_COUNT = 6
         private const val TRACK_PREROLL_MS = 500L
