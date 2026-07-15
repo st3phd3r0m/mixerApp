@@ -3,6 +3,7 @@ package com.example.mixerapp.viewmodel
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import androidx.annotation.OptIn
 import androidx.documentfile.provider.DocumentFile
@@ -42,6 +43,11 @@ class MixerViewModel(
     val sessionId: Int
 ) : AndroidViewModel(application) {
 
+    private data class PendingTrackStart(
+        val offsetMs: Long,
+        var warmupStarted: Boolean = false
+    )
+
     private data class MarkerRange(
         val startSec: Double,
         val endSec: Double?
@@ -63,6 +69,7 @@ class MixerViewModel(
 
     companion object {
         const val TRACK_COUNT = 6
+        private const val TRACK_PREROLL_MS = 500L
     }
 
     // ────────────────────────── État UI ──────────────────────────────────────
@@ -113,7 +120,8 @@ class MixerViewModel(
     private var playStartRealtimeMs: Long = 0L
     private var virtualStartPositionMs: Long = 0L   // Position virtuelle au démarrage/resume
     private var lastPausedPositionMs: Long = 0L      // Position virtuelle sauvée lors du pause
-    private val pendingOffsetJobs = mutableMapOf<Int, Job>()  // Jobs de démarrage décalé
+    private val pendingTrackStarts = mutableMapOf<Int, PendingTrackStart>() // trackId -> start info
+    private val warmingTrackIds = mutableSetOf<Int>()
 
     // ────────────────────────── Couche audio ──────────────────────────────────
 
@@ -275,40 +283,6 @@ class MixerViewModel(
             } finally {
                 finishImportProgress()
             }
-        }
-    }
-
-    fun importReaperProjectFromFolder(folderUri: Uri) {
-        viewModelScope.launch {
-            val resolver = getApplication<Application>().contentResolver
-            val root = DocumentFile.fromTreeUri(getApplication(), folderUri)
-            if (root == null || !root.isDirectory) {
-                _importMessage.value = "Dossier invalide"
-                return@launch
-            }
-
-            val projectFiles = findProjectFiles(root)
-            if (projectFiles.isEmpty()) {
-                _importMessage.value = "Aucun fichier .rpp trouve dans le dossier"
-                return@launch
-            }
-
-            if (projectFiles.size > 1) {
-                _pendingProjectChoices.value = projectFiles
-                    .sortedBy { it.relativePath.lowercase() }
-                    .map {
-                        PendingProjectChoice(
-                            name = it.file.name ?: "projet.rpp",
-                            relativePath = it.relativePath,
-                            projectUri = it.file.uri,
-                            folderUri = folderUri
-                        )
-                    }
-                _importMessage.value = "Plusieurs projets detectes: choisis le .rpp"
-                return@launch
-            }
-
-            importReaperProjectDocument(root, projectFiles.first().file, resolver)
         }
     }
 
@@ -625,12 +599,13 @@ class MixerViewModel(
 
         _isPlaying.value = true
         val resumeFromMs = lastPausedPositionMs
-        playStartRealtimeMs = System.currentTimeMillis()
+        playStartRealtimeMs = SystemClock.elapsedRealtime()
         virtualStartPositionMs = resumeFromMs
 
-        // Annuler les jobs de démarrage décalé en attente
-        pendingOffsetJobs.values.forEach { it.cancel() }
-        pendingOffsetJobs.clear()
+        // Recalcule les démarrages différés depuis la position courante.
+        pendingTrackStarts.clear()
+        warmingTrackIds.clear()
+        applyAllVolumes(_tracks.value)
 
         loadedTracks.forEach { track ->
             val tp = trackPlayers[track.id]
@@ -646,15 +621,11 @@ class MixerViewModel(
                 }
                 tp.player.play()
             } else {
-                // Cette piste démarre plus tard: programmer le démarrage décalé
+                // Cette piste démarre plus tard: elle reste en pause à 0 puis sera lancée
+                // par le scheduler global quand la tête de lecture atteint son offset.
                 tp.player.seekTo(0)
                 tp.player.pause()
-                val delayMs = offsetMs - resumeFromMs
-                val job = viewModelScope.launch {
-                    delay(delayMs)
-                    if (_isPlaying.value) tp.player.play()
-                }
-                pendingOffsetJobs[track.id] = job
+                pendingTrackStarts[track.id] = PendingTrackStart(offsetMs = offsetMs)
             }
         }
         startProgressTicker()
@@ -663,10 +634,11 @@ class MixerViewModel(
     fun pauseAll() {
         lastPausedPositionMs = _projectPositionMs.value
         _isPlaying.value = false
-        pendingOffsetJobs.values.forEach { it.cancel() }
-        pendingOffsetJobs.clear()
+        pendingTrackStarts.clear()
+        warmingTrackIds.clear()
         trackPlayers.forEach { it.player.pause() }
         stopProgressTicker()
+        applyAllVolumes(_tracks.value)
         updatePlaybackProgress()
     }
 
@@ -674,13 +646,14 @@ class MixerViewModel(
         lastPausedPositionMs = 0L
         virtualStartPositionMs = 0L
         _isPlaying.value = false
-        pendingOffsetJobs.values.forEach { it.cancel() }
-        pendingOffsetJobs.clear()
+        pendingTrackStarts.clear()
+        warmingTrackIds.clear()
         trackPlayers.forEach { tp ->
             tp.player.pause()
             tp.player.seekTo(0)
         }
         stopProgressTicker()
+        applyAllVolumes(_tracks.value)
         updatePlaybackProgress(forcePositionZero = true)
     }
 
@@ -690,13 +663,13 @@ class MixerViewModel(
         val clampedProgress = progress.coerceIn(0f, 1f)
         val targetMs = (durationMs * clampedProgress).toLong().coerceIn(0L, durationMs)
 
-        // Annuler les jobs décalés en attente
-        pendingOffsetJobs.values.forEach { it.cancel() }
-        pendingOffsetJobs.clear()
+        // Replanifier les démarrages décalés depuis la nouvelle position.
+        pendingTrackStarts.clear()
+        warmingTrackIds.clear()
 
         lastPausedPositionMs = targetMs
         virtualStartPositionMs = targetMs
-        playStartRealtimeMs = System.currentTimeMillis()
+        playStartRealtimeMs = SystemClock.elapsedRealtime()
         _projectPositionMs.value = targetMs
 
         _tracks.value.filter { it.isLoaded }.forEach { track ->
@@ -709,15 +682,12 @@ class MixerViewModel(
                 tp.player.seekTo(0)
                 tp.player.pause()
                 if (_isPlaying.value) {
-                    val delayMs = offsetMs - targetMs
-                    val job = viewModelScope.launch {
-                        delay(delayMs)
-                        if (_isPlaying.value) tp.player.play()
-                    }
-                    pendingOffsetJobs[track.id] = job
+                    pendingTrackStarts[track.id] = PendingTrackStart(offsetMs = offsetMs)
                 }
             }
         }
+
+        applyAllVolumes(_tracks.value)
     }
 
     private fun handlePlaybackEndedIfNeeded() {
@@ -745,8 +715,46 @@ class MixerViewModel(
         progressJob = viewModelScope.launch {
             while (isActive && _isPlaying.value) {
                 updatePlaybackProgress()
-                delay(120)
+                triggerPendingTrackStarts(_projectPositionMs.value)
+                delay(16)
             }
+        }
+    }
+
+    private fun triggerPendingTrackStarts(projectPositionMs: Long) {
+        if (pendingTrackStarts.isEmpty() || !_isPlaying.value) return
+
+        var volumeStateChanged = false
+        val readyToUnmute = mutableListOf<Int>()
+
+        pendingTrackStarts.forEach { (trackId, start) ->
+            val warmupStartMs = (start.offsetMs - TRACK_PREROLL_MS).coerceAtLeast(0L)
+
+            if (!start.warmupStarted && projectPositionMs >= warmupStartMs) {
+                trackPlayers[trackId].player.run {
+                    seekTo(0)
+                    play()
+                }
+                start.warmupStarted = true
+                if (warmingTrackIds.add(trackId)) {
+                    volumeStateChanged = true
+                }
+            }
+
+            if (projectPositionMs >= start.offsetMs) {
+                readyToUnmute += trackId
+            }
+        }
+
+        readyToUnmute.forEach { trackId ->
+            pendingTrackStarts.remove(trackId)
+            if (warmingTrackIds.remove(trackId)) {
+                volumeStateChanged = true
+            }
+        }
+
+        if (volumeStateChanged) {
+            applyAllVolumes(_tracks.value)
         }
     }
 
@@ -780,7 +788,7 @@ class MixerViewModel(
         val positionMs = when {
             forcePositionZero -> 0L
             _isPlaying.value && playStartRealtimeMs > 0L -> {
-                val elapsed = System.currentTimeMillis() - playStartRealtimeMs
+                val elapsed = SystemClock.elapsedRealtime() - playStartRealtimeMs
                 (virtualStartPositionMs + elapsed).coerceAtLeast(0L)
             }
             else -> lastPausedPositionMs
@@ -837,6 +845,7 @@ class MixerViewModel(
 
     /** Volume réel en tenant compte du mute et du solo. */
     private fun effectiveVolume(track: TrackState, allTracks: List<TrackState>): Float {
+        if (track.id in warmingTrackIds) return 0f
         if (track.isMuted) return 0f
         val anySolo = allTracks.any { it.isSolo }
         if (anySolo && !track.isSolo) return 0f
