@@ -14,7 +14,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
@@ -87,14 +86,6 @@ fun MixerScreen(
             }
             .distinct()
             .toList()
-    }
-
-    val openProjectExplorer = {
-        refreshPersistedTreeUris()
-        preferredExplorerRoot = persistedTreeUris.firstOrNull()
-        activeTrackForExplorer = null
-        explorerUsage = ExplorerUsage.MixerProject
-        showExplorer = true
     }
 
     fun openAudioExplorer(trackId: Int) {
@@ -247,9 +238,8 @@ fun MixerScreen(
                 hideExplorer()
                 when (explorerUsage) {
                     ExplorerUsage.MixerProject -> {
-                        val folderUri = currentFolderUri
-                        if (folderUri != null) {
-                            viewModel.chooseProjectFromFolder(selectedUri, folderUri)
+                        if (currentFolderUri != null) {
+                            viewModel.chooseProjectFromFolder(selectedUri, currentFolderUri)
                         } else {
                             viewModel.importReaperProject(selectedUri)
                         }
@@ -578,7 +568,7 @@ private fun LaserProgressBar(
     canSeek: Boolean,
     onSeek: (Float) -> Unit
 ) {
-    var sliderProgress by remember { mutableStateOf(playbackProgress.coerceIn(0f, 1f)) }
+    var sliderProgress by remember { mutableFloatStateOf(playbackProgress.coerceIn(0f, 1f)) }
     var isDragging by remember { mutableStateOf(false) }
 
     LaunchedEffect(playbackProgress) {
