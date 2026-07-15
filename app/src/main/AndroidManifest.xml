@@ -3,10 +3,8 @@
 
     <!-- Permissions pour accéder aux fichiers audio (Android 13+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <!-- Pour les versions antérieures à Android 13 -->
+    <!-- Pour les versions antérieures à Android 13 (READ_EXTERNAL_STORAGE n'est plus nécessaire à partir d'Android 10, mais on la garde pour API 9-12) -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
     <application
