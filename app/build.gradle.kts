@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.mixerapp"
+    namespace = "com.example.reapmixer"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -12,7 +12,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.mixerapp"
+        applicationId = "com.example.reapmixer"
         minSdk = 25
         targetSdk = 36
         versionCode = 1

@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "MixerApp"
+rootProject.name = "ReapMixer"
 include(":app")

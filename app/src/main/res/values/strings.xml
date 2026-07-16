@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">MixerApp</string>
+    <string name="app_name">ReapMixer</string>
     <string name="imported_tracks_count">%1$d/%2$d pistes importees</string>
 </resources>
