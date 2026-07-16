@@ -2,6 +2,8 @@ package com.example.reapmixer.data.sessions
 
 import android.content.Context
 import android.net.Uri
+import androidx.core.net.toUri
+import androidx.core.content.edit
 
 data class SessionProjectLink(
     val projectUri: Uri,
@@ -24,7 +26,7 @@ class SessionProjectLinkStorage(context: Context) {
         val markerStartSec = parts.getOrNull(3)?.toDoubleOrNull()
         val markerEndSec = parts.getOrNull(4)?.toDoubleOrNull()
         return SessionProjectLink(
-            projectUri = Uri.parse(project),
+            projectUri = project.toUri(),
             folderUri = folder?.let(Uri::parse),
             markerName = markerName,
             markerStartSec = markerStartSec,
@@ -44,11 +46,11 @@ class SessionProjectLinkStorage(context: Context) {
             append('|')
             append(link.markerEndSec?.toString().orEmpty())
         }
-        prefs.edit().putString(key(sessionId), serialized).apply()
+        prefs.edit { putString(key(sessionId), serialized) }
     }
 
     fun clear(sessionId: Int) {
-        prefs.edit().remove(key(sessionId)).apply()
+        prefs.edit { remove(key(sessionId)) }
     }
 
     companion object {

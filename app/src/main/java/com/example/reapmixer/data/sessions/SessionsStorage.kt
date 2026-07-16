@@ -3,6 +3,7 @@ package com.example.reapmixer.data.sessions
 import android.content.Context
 import android.net.Uri
 import com.example.reapmixer.model.Session
+import androidx.core.content.edit
 
 class SessionsStorage(context: Context) {
 
@@ -28,7 +29,7 @@ class SessionsStorage(context: Context) {
         val serialized = sessions.joinToString(separator = "\n") { session ->
             "${session.id}|${Uri.encode(session.name)}"
         }
-        prefs.edit().putString(KEY_SESSIONS, serialized).apply()
+        prefs.edit { putString(KEY_SESSIONS, serialized) }
     }
 
     companion object {

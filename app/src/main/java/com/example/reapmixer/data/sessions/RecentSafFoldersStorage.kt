@@ -2,6 +2,8 @@ package com.example.reapmixer.data.sessions
 
 import android.content.Context
 import android.net.Uri
+import androidx.core.content.edit
+import androidx.core.net.toUri
 
 data class RecentSafFolder(
     val uri: Uri,
@@ -31,7 +33,7 @@ class RecentSafFoldersStorage(context: Context) {
                 val ts = if (hasV2) part3.toLongOrNull() ?: 0L else part2.toLongOrNull() ?: 0L
                 val decodedLabel = Uri.decode(labelRaw).ifBlank { uriRaw.substringAfterLast('/') }
                 RecentSafFolder(
-                    uri = Uri.parse(uriRaw),
+                    uri = uriRaw.toUri(),
                     label = decodedLabel,
                     relativePath = Uri.decode(relativeRaw).ifBlank { decodedLabel },
                     lastUsedAt = ts
@@ -45,7 +47,7 @@ class RecentSafFoldersStorage(context: Context) {
         val serialized = recents.joinToString(separator = "\n") { folder ->
             "${folder.uri}|${Uri.encode(folder.label)}|${Uri.encode(folder.relativePath)}|${folder.lastUsedAt}"
         }
-        prefs.edit().putString(KEY_RECENTS, serialized).apply()
+        prefs.edit { putString(KEY_RECENTS, serialized) }
     }
 
     companion object {
